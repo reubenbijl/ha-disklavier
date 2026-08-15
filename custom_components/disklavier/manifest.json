@@ -1,13 +1,18 @@
 {
   "domain": "disklavier",
   "name": "Yamaha Disklavier",
-  "codeowners": ["@reubenbijl"],
+  "codeowners": [
+    "@reubenbijl"
+  ],
   "config_flow": true,
   "documentation": "https://github.com/reubenbijl/ha-disklavier",
   "integration_type": "device",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/reubenbijl/ha-disklavier/issues",
-  "requirements": ["aiodisklavier==0.1.0"],
+  "quality_scale": "platinum",
+  "requirements": [
+    "aiodisklavier==0.1.0"
+  ],
   "ssdp": [
     {
       "deviceType": "urn:schemas-upnp-org:device:Disklavier:1"

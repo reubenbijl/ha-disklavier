@@ -1,0 +1,7 @@
+# Pulls in Home Assistant itself. Deliberately unpinned so the suite runs against the
+# current release; pin it here if you need a reproducible older target.
+pytest-homeassistant-custom-component
+
+# Quality tooling, matching what CI runs.
+ruff
+mypy

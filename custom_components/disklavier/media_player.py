@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from aiodisklavier import (
+    VOLUME_MAX,
     DisklavierError,
     PlaylistGroup,
     PowerStatus,
     SongGroup,
-    VOLUME_MAX,
 )
 from aiodisklavier import RepeatMode as DkvRepeat
-
 from homeassistant.components.media_player import (
     BrowseMedia,
     MediaClass,
@@ -34,6 +34,8 @@ from .const import (
     CONTENT_RADIO,
     CONTENT_SEARCH,
     CONTENT_SONG,
+    DOMAIN,
+    MS_PER_SECOND,
 )
 from .coordinator import DisklavierConfigEntry, DisklavierCoordinator
 from .entity import DisklavierEntity
@@ -174,9 +176,9 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         return None if position is None else int(position)
 
     @property
-    def media_position_updated_at(self):
-        """Return when the position was last refreshed, so the UI can extrapolate."""
-        return self.coordinator.last_update_success_time
+    def media_position_updated_at(self) -> datetime:
+        """Return when the position was last read, so the UI can extrapolate."""
+        return self.coordinator.data.fetched_at
 
     @property
     def repeat(self) -> RepeatMode | None:
@@ -198,65 +200,57 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
     # Commands
     # ------------------------------------------------------------------
 
-    async def _async_run(self, coro) -> None:
-        """Run a client call, refresh, and translate library errors for the UI."""
-        try:
-            await coro
-        except DisklavierError as err:
-            raise HomeAssistantError(f"Disklavier command failed: {err}") from err
-        await self.coordinator.async_request_refresh()
-
     async def async_media_play(self) -> None:
         """Start playback."""
-        await self._async_run(self.coordinator.client.async_play())
+        await self._async_call(self.coordinator.client.async_play())
 
     async def async_media_pause(self) -> None:
         """Pause playback."""
-        await self._async_run(self.coordinator.client.async_pause())
+        await self._async_call(self.coordinator.client.async_pause())
 
     async def async_media_stop(self) -> None:
         """Stop playback and rewind."""
-        await self._async_run(self.coordinator.client.async_stop())
+        await self._async_call(self.coordinator.client.async_stop())
 
     async def async_media_next_track(self) -> None:
         """Skip to the next song."""
-        await self._async_run(self.coordinator.client.async_next_song())
+        await self._async_call(self.coordinator.client.async_next_song())
 
     async def async_media_previous_track(self) -> None:
         """Go back to the previous song."""
-        await self._async_run(self.coordinator.client.async_previous_song())
+        await self._async_call(self.coordinator.client.async_previous_song())
 
     async def async_media_seek(self, position: float) -> None:
         """Seek to a position, in seconds."""
-        await self._async_run(
-            self.coordinator.client.async_seek(int(position * 1000))
+        await self._async_call(
+            self.coordinator.client.async_seek(int(position * MS_PER_SECOND))
         )
 
     async def async_set_volume_level(self, volume: float) -> None:
         """Set the volume from a 0..1 value."""
-        await self._async_run(
+        await self._async_call(
             self.coordinator.client.async_set_volume(round(volume * VOLUME_MAX))
         )
 
     async def async_volume_up(self) -> None:
         """Step the volume up."""
-        await self._async_run(self.coordinator.client.async_volume_up())
+        await self._async_call(self.coordinator.client.async_volume_up())
 
     async def async_volume_down(self) -> None:
         """Step the volume down."""
-        await self._async_run(self.coordinator.client.async_volume_down())
+        await self._async_call(self.coordinator.client.async_volume_down())
 
     async def async_turn_on(self) -> None:
         """Wake the piano from standby."""
-        await self._async_run(self.coordinator.client.async_turn_on())
+        await self._async_call(self.coordinator.client.async_turn_on())
 
     async def async_turn_off(self) -> None:
         """Send the piano to standby."""
-        await self._async_run(self.coordinator.client.async_turn_off())
+        await self._async_call(self.coordinator.client.async_turn_off())
 
     async def async_set_repeat(self, repeat: RepeatMode) -> None:
         """Set the repeat mode, preserving the current shuffle setting."""
-        await self._async_run(
+        await self._async_call(
             self.coordinator.client.async_set_repeat(
                 _to_disklavier_repeat(repeat, bool(self.shuffle))
             )
@@ -264,7 +258,7 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
 
     async def async_set_shuffle(self, shuffle: bool) -> None:
         """Turn shuffle on or off, preserving the current repeat mode."""
-        await self._async_run(
+        await self._async_call(
             self.coordinator.client.async_set_repeat(
                 _to_disklavier_repeat(self.repeat or RepeatMode.OFF, shuffle)
             )
@@ -293,35 +287,43 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
 
         try:
             if kind == CONTENT_SEARCH:
-                await self._async_run(client.async_play_search(rest))
+                await self._async_call(client.async_play_search(rest))
                 return
             if kind == CONTENT_RADIO:
-                await self._async_run(client.async_play_radio(int(rest)))
+                await self._async_call(client.async_play_radio(int(rest)))
                 return
 
             group_name, _, item_id = rest.partition("/")
             if kind == CONTENT_SONG:
-                await self._async_run(
+                await self._async_call(
                     client.async_play_song(int(item_id), SongGroup(group_name))
                 )
             elif kind == CONTENT_ALBUM:
-                await self._async_run(
+                await self._async_call(
                     client.async_play_album(int(item_id), SongGroup(group_name))
                 )
             elif kind == CONTENT_PLAYLIST:
-                await self._async_run(
+                await self._async_call(
                     client.async_play_playlist(int(item_id), PlaylistGroup(group_name))
                 )
             elif kind == CONTENT_PLAYLIST_ITEM:
-                await self._async_run(
+                await self._async_call(
                     client.async_play_playlist_item(
                         int(item_id), PlaylistGroup(group_name)
                     )
                 )
             else:
-                raise HomeAssistantError(f"Unsupported media id: {media_id}")
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="unsupported_media_id",
+                    translation_placeholders={"media_id": media_id},
+                )
         except (ValueError, KeyError) as err:
-            raise HomeAssistantError(f"Could not parse media id {media_id!r}") from err
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="unsupported_media_id",
+                translation_placeholders={"media_id": media_id},
+            ) from err
 
     # ------------------------------------------------------------------
     # Browsing
@@ -352,13 +354,23 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
             if kind == CONTENT_RADIO:
                 return await self._browse_radio()
         except DisklavierError as err:
-            raise HomeAssistantError(f"Could not browse the Disklavier: {err}") from err
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="browse_failed",
+                translation_placeholders={"error": str(err)},
+            ) from err
         except ValueError as err:
             raise HomeAssistantError(
-                f"Unknown media id {media_content_id!r}"
+                translation_domain=DOMAIN,
+                translation_key="unsupported_media_id",
+                translation_placeholders={"media_id": str(media_content_id)},
             ) from err
 
-        raise HomeAssistantError(f"Unknown media id {media_content_id!r}")
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="unsupported_media_id",
+            translation_placeholders={"media_id": str(media_content_id)},
+        )
 
     def _browse_root(self) -> BrowseMedia:
         """Build the top level of the browser."""
@@ -407,12 +419,10 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
     async def _browse_song_library(self, group: SongGroup) -> BrowseMedia:
         """List the songs in one library.
 
-        An empty library is reported by the piano as an error; show it as empty instead.
+        An empty library comes back as an empty list from the client, so anything raising
+        here is a real fault and is reported as one.
         """
-        try:
-            songs = await self.coordinator.client.async_get_songs(group)
-        except DisklavierError:
-            songs = []
+        songs = await self.coordinator.client.async_get_songs(group)
 
         return BrowseMedia(
             title=dict(_SONG_LIBRARIES).get(group, group.value),
@@ -437,10 +447,7 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
 
     async def _browse_playlist_library(self, group: PlaylistGroup) -> BrowseMedia:
         """List the playlists in one library."""
-        try:
-            playlists = await self.coordinator.client.async_get_playlists(group)
-        except DisklavierError:
-            playlists = []
+        playlists = await self.coordinator.client.async_get_playlists(group)
 
         return BrowseMedia(
             title=dict(_PLAYLIST_LIBRARIES).get(group, group.value),
@@ -469,12 +476,9 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         self, group: PlaylistGroup, playlist_id: int
     ) -> BrowseMedia:
         """List the songs inside one playlist."""
-        try:
-            items = await self.coordinator.client.async_get_playlist_items(
-                playlist_id, group
-            )
-        except DisklavierError:
-            items = []
+        items = await self.coordinator.client.async_get_playlist_items(
+            playlist_id, group
+        )
 
         return BrowseMedia(
             title="Playlist",
@@ -502,12 +506,9 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
     async def _browse_radio(self) -> BrowseMedia:
         """List the radio channels.
 
-        Radio is unavailable in the Japan region, where this comes back empty.
+        Radio is unavailable in some regions, where this comes back as an empty list.
         """
-        try:
-            channels = await self.coordinator.client.async_get_radio_channels()
-        except DisklavierError:
-            channels = []
+        channels = await self.coordinator.client.async_get_radio_channels()
 
         return BrowseMedia(
             title="Radio",

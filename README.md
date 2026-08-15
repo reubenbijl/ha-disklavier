@@ -8,42 +8,72 @@ protocol work and its [full reference](https://github.com/reubenbijl/aiodisklavi
 
 Verified against firmware **5.24.00** on a Disklavier ENSPIRE PRO grand.
 
-> This integration is intended for submission to Home Assistant core. Until it lands there,
-> this repository is how you install it.
+## What you can do with it
 
-## Install
+- **Play the piano from an automation** — a wake-up piece in the morning, something quiet in
+  the evening, a specific song when someone comes home.
+- **Use it as a doorbell or notification**, either through the media player or through
+  `aiodisklavier`'s one-shot notify helper, which restores whatever was playing afterwards.
+- **Silence it on a schedule** — switch to quiet mode after bedtime so the keys still move
+  but the hammers do not strike.
+- **Browse and play the whole library** from the Home Assistant media browser: the built-in
+  songs, your recordings, downloaded songs, the PC sharing folder, playlists, and radio.
+- **See what it is playing** on a dashboard, with title, artist, position and duration.
+
+## Supported devices
+
+Disklavier **ENSPIRE** models that expose the local HTTP API — confirmed on an ENSPIRE PRO
+grand running 5.24.00. ENSPIRE ST and CL should work identically; reports welcome.
+
+**Not supported:** Mark IV, E3 and earlier. Those speak a different protocol entirely. If
+your piano offers a MusicCast integration instead, that is a different device family and
+this integration will not find it.
+
+## Installation
 
 ### HACS
 
-Add this repository as a custom repository (category: Integration), install, and restart
-Home Assistant.
+Add this repository as a custom repository (category: **Integration**), install it, and
+restart Home Assistant.
 
 ### Manually
 
 Copy `custom_components/disklavier/` into your Home Assistant `config/custom_components/`
 directory and restart.
 
-## Set up
+## Setting it up
 
-The piano is discovered automatically over SSDP and will appear under **Settings → Devices &
-Services**. You can also add it by IP address; find that on the piano under Settings →
-Network.
+The piano is discovered automatically over SSDP and appears under **Settings → Devices &
+Services**. Accept the discovery and you are done.
 
-No password or account is needed. If your piano has a passcode enabled the behaviour is
-untested — please open an issue.
+To add it by hand instead, choose **Add Integration → Yamaha Disklavier** and enter its
+address.
+
+| Parameter | Description |
+|---|---|
+| **Host** | The piano's hostname or IP address on your network. Find it on the piano under **Settings → Network**. |
+
+No password or account is needed — the local API is unauthenticated.
+
+If the piano later moves to a different IP address, it is normally picked up automatically by
+rediscovery. If it is not, use **Reconfigure** on the integration entry rather than deleting
+and re-adding it, which would lose the entity history. Reconfigure refuses to point an entry
+at a *different* piano.
+
+### Removing it
+
+Delete the integration entry from **Settings → Devices & Services**. Nothing is left behind
+on the piano; the integration only ever reads and sends commands.
 
 ## Entities
 
-| Entity | Platform | Notes |
+| Entity | Platform | What it does |
 |---|---|---|
-| Disklavier | `media_player` | Transport, volume, seek, repeat and shuffle, power, and full library browsing |
-| Quiet mode | `select` | Acoustic or Quiet — whether the hammers physically strike the strings |
-| Play test chord | `button` | Disabled by default. Plays a C major triad for one second without disturbing a loaded song |
+| Disklavier | `media_player` | Play, pause, stop, next, previous, seek, volume, mute-by-volume, repeat and shuffle, power, and the full media browser |
+| Quiet mode | `select` | **Acoustic** or **Quiet** — whether the hammers physically strike the strings |
+| Play test chord | `button` | Sounds a chord to confirm the piano is responding. Disabled by default, because pressing it makes a noise |
 
-Browsing covers the built-in library, your recordings, downloaded songs, the PC sharing
-folder, playlists, and DisklavierRadio channels.
-
-### Playing something specific
+## Playing something specific
 
 `media_player.play_media` accepts these `media_content_id` forms:
 
@@ -56,8 +86,8 @@ radio/<channel_id>
 search/<title>                 e.g. search/Clair de lune
 ```
 
-`search/` is a fuzzy title match run on the piano itself, which makes it the practical
-choice for voice assistants and scripts:
+`search/` is a fuzzy title match run on the piano itself, which makes it the practical choice
+for voice assistants and scripts — you do not need to know any ids:
 
 ```yaml
 action: media_player.play_media
@@ -68,29 +98,113 @@ data:
   media_content_id: search/Clair de lune
 ```
 
-## Things the piano does that may surprise you
+A gentle wake-up, quiet enough not to startle anyone:
 
-- **Turning it "on" takes about twelve seconds.** The piano reports a transitional `wakeup`
-  state and ignores commands throughout. The entity shows as off until it is genuinely ready.
+```yaml
+automation:
+  - alias: Morning piano
+    triggers:
+      - trigger: time
+        at: "07:30:00"
+    actions:
+      - action: media_player.turn_on
+        target:
+          entity_id: media_player.disklavier_pro
+      # Waking takes about twelve seconds, and commands sent during it are ignored.
+      - delay: "00:00:15"
+      - action: media_player.volume_set
+        target:
+          entity_id: media_player.disklavier_pro
+        data:
+          volume_level: 0.4
+      - action: media_player.play_media
+        target:
+          entity_id: media_player.disklavier_pro
+        data:
+          media_content_type: music
+          media_content_id: search/Clair de lune
+```
+
+Silence the room after bedtime without stopping playback:
+
+```yaml
+      - action: select.select_option
+        target:
+          entity_id: select.disklavier_pro_quiet_mode
+        data:
+          option: quiet
+```
+
+## How data updates
+
+The integration polls the piano every **5 seconds** over HTTP. The piano's own web interface
+polls twice a second, so this is well within what it expects. Every command you send triggers
+an immediate refresh, so the UI does not wait a full interval to catch up.
+
+Playback position is interpolated between polls, so the progress bar moves smoothly rather
+than stepping every five seconds.
+
+## Known limitations
+
+These are properties of the piano's firmware, not of the integration:
+
+- **Turning it on takes about twelve seconds.** The piano reports a transitional waking
+  state and ignores commands throughout. The entity stays *off* until it is genuinely ready,
+  so add a delay before sending commands after `turn_on`.
 - **Stop and pause look the same.** The firmware has no stop state — stopping reports as
-  paused at position zero, which the integration surfaces as idle.
-- **Radio silently swallows transport commands.** While a radio channel is playing, play and
-  pause return success but do nothing. This is the firmware's behaviour, not the
-  integration's.
+  paused at position zero, which appears as *idle*.
+- **Radio swallows transport commands.** While a radio channel is playing, play and pause
+  may appear to succeed without doing anything.
+- **Repeat and shuffle are one setting on the piano.** Home Assistant shows them as two
+  controls; turning shuffle on implies repeat, because the piano cannot shuffle without it.
+- **Recording is not exposed.** The API supports it, but it is untested here and not wired up.
+- **A passcode-protected piano is untested.** If yours has one set, please open an issue.
 
-## Status and contributing
+## Troubleshooting
 
-Working and verified on hardware. Known gaps before this is ready for core:
+**The piano is not discovered.** SSDP discovery needs Home Assistant and the piano on the
+same network segment, with multicast allowed between them. Add it by IP address instead —
+**Add Integration → Yamaha Disklavier**.
 
-- No test suite yet. Core requires config-flow tests at minimum for the bronze quality scale.
-- `manifest.json` carries a `version` key, which HACS requires and core forbids — it must be
-  dropped when the integration moves into core.
-- Behaviour with a passcode-protected piano is untested.
-- Remote Lesson and Remote Live modes are unimplemented; their state endpoints only exist
-  while those modes are running.
+**It shows as unavailable.** The integration could not reach the piano. Check the address is
+still right, and that you can load `http://<piano-ip>/api/1.0/current_info` in a browser.
+Note that the piano answers HTTP even in standby, so "unavailable" means a network problem
+rather than the piano being asleep — an asleep piano shows as *off*.
 
-Issues and pull requests welcome, particularly reports from other ENSPIRE models and
-firmware versions.
+**Commands do nothing.** Check whether the piano is waking (see above), or playing radio.
+
+**The media browser shows an error.** That means a library failed to list, rather than being
+empty — an empty library shows as an empty folder. Check the piano is still reachable.
+
+**Reporting a problem.** Download diagnostics from the integration's device page and attach
+them to the issue. The piano's address and serial number are redacted automatically.
+
+## Development
+
+The test suite runs against a real Home Assistant, which needs Python 3.14. If you do not
+have one, `.devtools/run` executes anything inside a container that does:
+
+```bash
+.devtools/run pytest
+.devtools/run ruff check .
+.devtools/run mypy custom_components/disklavier
+```
+
+It expects an `aiodisklavier` checkout alongside this one, and puts it on `PYTHONPATH` so
+the integration is always tested against the library source.
+
+Coverage is held at **100%**, and CI additionally runs Home Assistant's own `hassfest`
+validator and the HACS action.
+
+## Quality scale
+
+This integration targets the **platinum** tier of Home Assistant's integration quality scale.
+Every rule's status, including the ones that are exempt and why, is recorded in
+[`quality_scale.yaml`](custom_components/disklavier/quality_scale.yaml).
+
+One rule cannot be satisfied from this repository: `brands` requires a pull request to
+[home-assistant/brands](https://github.com/home-assistant/brands). Source artwork is in
+[`assets/`](assets).
 
 ## Licence
 

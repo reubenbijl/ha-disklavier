@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from aiodisklavier import Disklavier, DisklavierConnectionError, DisklavierError
-
 from homeassistant.const import CONF_HOST, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady

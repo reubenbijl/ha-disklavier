@@ -1,5 +1,6 @@
 {
   "config": {
+    "flow_title": "{name}",
     "step": {
       "user": {
         "title": "Connect to your Disklavier",
@@ -8,7 +9,17 @@
           "host": "[%key:common::config_flow::data::host%]"
         },
         "data_description": {
-          "host": "The address of the piano on your network. You can find this under Settings, Network on the piano itself."
+          "host": "The address of the piano on your network. You can find it on the piano under Settings, Network."
+        }
+      },
+      "reconfigure": {
+        "title": "Change your Disklavier's address",
+        "description": "Enter the new hostname or IP address. It must be the same piano this entry was created for.",
+        "data": {
+          "host": "[%key:common::config_flow::data::host%]"
+        },
+        "data_description": {
+          "host": "[%key:component::disklavier::config::step::user::data_description::host%]"
         }
       },
       "discovery_confirm": {
@@ -23,7 +34,9 @@
     },
     "abort": {
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
-      "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]"
+      "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+      "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]",
+      "wrong_piano": "That address is a different Disklavier. Add it as a new device instead of reconfiguring this one."
     }
   },
   "entity": {
@@ -40,6 +53,17 @@
           "quiet": "Quiet"
         }
       }
+    }
+  },
+  "exceptions": {
+    "command_failed": {
+      "message": "The Disklavier rejected the command: {error}"
+    },
+    "browse_failed": {
+      "message": "Could not browse the Disklavier's library: {error}"
+    },
+    "unsupported_media_id": {
+      "message": "Cannot play \"{media_id}\". Choose an item from the media browser, or use a supported media content ID."
     }
   }
 }

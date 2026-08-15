@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+      - run: pip install -r requirements-test.txt
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format
+        run: ruff format --check .
+      # The platinum strict-typing rule. aiodisklavier ships py.typed, so its types reach
+      # this integration rather than silently degrading to Any.
+      - name: mypy
+        run: mypy custom_components/disklavier
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+      - run: pip install -r requirements-test.txt
+      # config-flow-test-coverage requires 100% of config_flow.py; the whole integration
+      # is held to the same bar, so any gap fails here.
+      - name: pytest
+        run: >-
+          pytest tests/
+          --cov=custom_components.disklavier
+          --cov-report=term-missing
+          --cov-fail-under=100
+
+  hassfest:
+    name: hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Home Assistant's own validator: checks the manifest, the quality_scale file,
+      # strings/icons/translations, and the SSDP matcher.
+      - uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hacs/action@main
+        with:
+          category: integration

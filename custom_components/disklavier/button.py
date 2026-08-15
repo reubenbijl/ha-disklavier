@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-from aiodisklavier import DisklavierError
-
 from homeassistant.components.button import ButtonEntity
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import DisklavierConfigEntry, DisklavierCoordinator
 from .entity import DisklavierEntity
 
+# Commands are sent one at a time; the piano is a single small web server.
 PARALLEL_UPDATES = 1
 
 
@@ -25,14 +24,18 @@ async def async_setup_entry(
 
 
 class DisklavierTestChordButton(DisklavierEntity, ButtonEntity):
-    """Play a C major chord on the piano.
+    """Play a chord on the piano.
 
-    Useful for confirming the piano really is responding, and for locating which instrument
-    an entity belongs to. Unlike the transport commands this goes to the MIDI patch daemon,
-    so it will not disturb a loaded or paused song.
+    Useful for confirming the piano really is responding, and for working out which
+    instrument an entity belongs to. Unlike the transport controls this goes to the MIDI
+    patch daemon, so it will not disturb a loaded or paused song.
+
+    Disabled by default: it makes a noise, which is not something to fire accidentally
+    while browsing the device page.
     """
 
     _attr_translation_key = "test_chord"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator: DisklavierCoordinator) -> None:
@@ -42,7 +45,4 @@ class DisklavierTestChordButton(DisklavierEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         """Play the chord."""
-        try:
-            await self.coordinator.client.async_play_test_chord()
-        except DisklavierError as err:
-            raise HomeAssistantError(f"Could not play the test chord: {err}") from err
+        await self._async_call(self.coordinator.client.async_play_test_chord())

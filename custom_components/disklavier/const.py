@@ -7,6 +7,8 @@ from typing import Final
 
 DOMAIN: Final = "disklavier"
 
+MANUFACTURER: Final = "Yamaha"
+
 #: The piano's own web UI polls twice a second. That is far more than Home Assistant needs;
 #: five seconds keeps the entity responsive while leaving the piano alone, and every command
 #: requests an immediate refresh anyway.
@@ -14,6 +16,9 @@ SCAN_INTERVAL: Final = timedelta(seconds=5)
 
 #: Waking from standby takes about twelve seconds, during which the piano ignores commands.
 WAKEUP_SECONDS: Final = 15
+
+#: Milliseconds per second, for converting the piano's positions to Home Assistant's seconds.
+MS_PER_SECOND: Final = 1000
 
 # media_content_id prefixes used by browse_media and play_media.
 CONTENT_SONG: Final = "song"

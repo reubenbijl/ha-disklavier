@@ -2,24 +2,37 @@
   "config": {
     "abort": {
       "already_configured": "Device is already configured",
-      "cannot_connect": "Failed to connect"
+      "cannot_connect": "Failed to connect",
+      "reconfigure_successful": "Re-configuration was successful",
+      "wrong_piano": "That address is a different Disklavier. Add it as a new device instead of reconfiguring this one."
     },
     "error": {
       "cannot_connect": "Failed to connect",
       "invalid_response": "The device answered, but it does not look like a Disklavier ENSPIRE.",
       "unknown": "Unexpected error"
     },
+    "flow_title": "{name}",
     "step": {
       "discovery_confirm": {
         "description": "Do you want to add the Disklavier {model} at {host} to Home Assistant?",
         "title": "Add your Disklavier"
+      },
+      "reconfigure": {
+        "data": {
+          "host": "Host"
+        },
+        "data_description": {
+          "host": "The address of the piano on your network. You can find it on the piano under Settings, Network."
+        },
+        "description": "Enter the new hostname or IP address. It must be the same piano this entry was created for.",
+        "title": "Change your Disklavier's address"
       },
       "user": {
         "data": {
           "host": "Host"
         },
         "data_description": {
-          "host": "The address of the piano on your network. You can find this under Settings, Network on the piano itself."
+          "host": "The address of the piano on your network. You can find it on the piano under Settings, Network."
         },
         "description": "Enter the hostname or IP address of your Yamaha Disklavier ENSPIRE.",
         "title": "Connect to your Disklavier"
@@ -40,6 +53,17 @@
           "quiet": "Quiet"
         }
       }
+    }
+  },
+  "exceptions": {
+    "browse_failed": {
+      "message": "Could not browse the Disklavier's library: {error}"
+    },
+    "command_failed": {
+      "message": "The Disklavier rejected the command: {error}"
+    },
+    "unsupported_media_id": {
+      "message": "Cannot play \"{media_id}\". Choose an item from the media browser, or use a supported media content ID."
     }
   }
 }

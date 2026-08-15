@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from aiodisklavier import DisklavierError, QuietMode
-
+from aiodisklavier import QuietMode
 from homeassistant.components.select import SelectEntity
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import DisklavierConfigEntry, DisklavierCoordinator
@@ -27,9 +25,9 @@ async def async_setup_entry(
 class DisklavierQuietModeSelect(DisklavierEntity, SelectEntity):
     """Whether the hammers physically strike the strings.
 
-    This is the control that makes a Disklavier a Disklavier: in ``quiet`` the keys still
-    move but the hammers are blocked, so playback is silent in the room and audible only
-    through the speakers or headphones.
+    This is the control that makes a Disklavier a Disklavier: in quiet mode the keys still
+    move but the hammers are stopped short, so playback is silent in the room and audible
+    only through the speakers or headphones.
     """
 
     _attr_translation_key = "quiet_mode"
@@ -47,8 +45,6 @@ class DisklavierQuietModeSelect(DisklavierEntity, SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         """Switch between acoustic and quiet."""
-        try:
-            await self.coordinator.client.async_set_quiet_mode(QuietMode(option))
-        except DisklavierError as err:
-            raise HomeAssistantError(f"Could not set quiet mode: {err}") from err
-        await self.coordinator.async_request_refresh()
+        await self._async_call(
+            self.coordinator.client.async_set_quiet_mode(QuietMode(option))
+        )

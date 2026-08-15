@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 
 from aiodisklavier import (
     CurrentInfo,
@@ -13,10 +14,10 @@ from aiodisklavier import (
     MasterState,
     StaticInfo,
 )
-
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, SCAN_INTERVAL
 
@@ -36,6 +37,10 @@ class DisklavierData:
 
     current: CurrentInfo
     master: MasterState | None
+    #: When this poll completed. The media player reports it as
+    #: ``media_position_updated_at`` so the UI can extrapolate playback position between
+    #: polls instead of stepping it every five seconds.
+    fetched_at: datetime
 
 
 class DisklavierCoordinator(DataUpdateCoordinator[DisklavierData]):
@@ -85,4 +90,6 @@ class DisklavierCoordinator(DataUpdateCoordinator[DisklavierData]):
                 )
                 self._master_warned = True
 
-        return DisklavierData(current=current, master=master)
+        return DisklavierData(
+            current=current, master=master, fetched_at=dt_util.utcnow()
+        )

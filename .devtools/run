@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Run a command inside the Python 3.14 test container.
+#
+# Home Assistant tracks the newest Python closely, so its test framework cannot be
+# installed on an older interpreter. Rather than add one to the host, everything runs in a
+# container. The aiodisklavier checkout next door is put on PYTHONPATH instead of being
+# pip-installed, so the integration is always tested against the library source and no
+# build is needed from the read-only mount.
+#
+#   .devtools/run pytest
+#   .devtools/run ruff check .
+#   .devtools/run python -c 'import homeassistant'
+#
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+lib="$(cd "$here/../aiodisklavier" && pwd)"
+
+if ! docker image inspect ha-disklavier-test >/dev/null 2>&1; then
+  echo "building test image..." >&2
+  docker build -q --platform linux/amd64 -f "$here/.devtools/Dockerfile" -t ha-disklavier-test "$here" >&2
+fi
+
+exec docker run --rm --platform linux/amd64 \
+  -e PYTHONPATH=/opt/aiodisklavier \
+  -e PYTHONDONTWRITEBYTECODE=1 \
+  -v "$here":/work \
+  -v "$lib":/opt/aiodisklavier:ro \
+  -w /work \
+  ha-disklavier-test "$@"

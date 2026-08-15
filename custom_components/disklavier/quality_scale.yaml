@@ -1,0 +1,200 @@
+rules:
+  # ------------------------------------------------------------------ Bronze
+  action-setup:
+    status: exempt
+    comment: |
+      The integration registers no service actions. Everything is exposed through entity
+      platforms, so there is nothing to register in async_setup.
+  appropriate-polling:
+    status: done
+    comment: |
+      Five seconds. The piano's own web UI polls its state file twice a second, so this is
+      already well below what the device expects, and every command issues an immediate
+      refresh so the UI never waits a full interval to reflect a user action.
+  brands:
+    status: todo
+    comment: |
+      Requires a pull request to home-assistant/brands, which cannot be satisfied from this
+      repository. Source artwork is in assets/.
+  common-modules:
+    status: done
+    comment: Coordinator in coordinator.py, base entity in entity.py.
+  config-flow-test-coverage:
+    status: done
+    comment: 100% of config_flow.py, enforced in CI.
+  config-flow:
+    status: done
+  dependency-transparency:
+    status: done
+    comment: |
+      aiodisklavier is MIT, developed in the open, built and published to PyPI from a
+      tagged GitHub release via trusted publishing.
+  docs-actions:
+    status: exempt
+    comment: No service actions to document.
+  docs-high-level-description:
+    status: done
+    comment: README. The home-assistant.io page is a core requirement, not a HACS one.
+  docs-installation-instructions:
+    status: done
+    comment: README, covering both HACS and manual installation.
+  docs-removal-instructions:
+    status: done
+    comment: README.
+  entity-event-setup:
+    status: exempt
+    comment: |
+      The device pushes nothing; it is polled over HTTP. There are no event subscriptions
+      to set up or tear down.
+  entity-unique-id:
+    status: done
+    comment: All entities key off the piano's own disklavier_id.
+  has-entity-name:
+    status: done
+  runtime-data:
+    status: done
+    comment: Typed via DisklavierConfigEntry.
+  test-before-configure:
+    status: done
+    comment: |
+      The config flow fetches static_info, which proves reachability, that the open API is
+      present, and that the device is a Disklavier rather than something else answering.
+  test-before-setup:
+    status: done
+    comment: async_setup_entry raises ConfigEntryNotReady if the piano is unreachable.
+  unique-config-entry:
+    status: done
+    comment: Unique ID is the piano's disklavier_id.
+
+  # ------------------------------------------------------------------ Silver
+  action-exceptions:
+    status: done
+    comment: |
+      Commands raise HomeAssistantError with a translation key. Invalid arguments raise
+      ServiceValidationError-equivalents from the library as ValueError before any request
+      is sent.
+  config-entry-unloading:
+    status: done
+  docs-configuration-parameters:
+    status: exempt
+    comment: |
+      The integration has no options flow. Host is the only setting, and it is changed
+      through the reconfigure flow.
+  docs-installation-parameters:
+    status: done
+    comment: README documents the host parameter and where to find it on the piano.
+  entity-unavailable:
+    status: done
+    comment: |
+      Entities follow the coordinator's availability. Note that HTTP reachability is not
+      the same as the piano being awake: it answers normally in standby, which is why
+      power state is a separate concept from availability here.
+  integration-owner:
+    status: done
+  log-when-unavailable:
+    status: done
+    comment: DataUpdateCoordinator logs once on the way down and once on recovery.
+  parallel-updates:
+    status: done
+    comment: |
+      PARALLEL_UPDATES = 1 on every platform. The piano is a single small web server and
+      its state file is written in place, so concurrent requests are worth avoiding.
+  reauthentication-flow:
+    status: exempt
+    comment: |
+      The local API is unauthenticated. A passcode-protected piano is untested and tracked
+      as a known limitation rather than claimed as supported.
+  test-coverage:
+    status: done
+    comment: 100%, enforced in CI.
+
+  # -------------------------------------------------------------------- Gold
+  devices:
+    status: done
+    comment: All entities belong to one device, identified by disklavier_id.
+  diagnostics:
+    status: done
+    comment: Host and serial redacted.
+  discovery-update-info:
+    status: done
+    comment: |
+      SSDP rediscovery updates the stored host, so a piano that changes DHCP lease is
+      followed automatically.
+  discovery:
+    status: done
+    comment: SSDP on urn:schemas-upnp-org:device:Disklavier:1.
+  docs-data-update:
+    status: done
+    comment: README explains the polling model and why it is five seconds.
+  docs-examples:
+    status: done
+    comment: README includes play_media examples, including search by title.
+  docs-known-limitations:
+    status: done
+    comment: |
+      README documents the wakeup delay, the absent stop state, radio swallowing transport
+      commands, and the untested passcode case.
+  docs-supported-devices:
+    status: done
+  docs-supported-functions:
+    status: done
+    comment: README lists every entity and what it controls.
+  docs-troubleshooting:
+    status: done
+  docs-use-cases:
+    status: done
+  dynamic-devices:
+    status: exempt
+    comment: |
+      A config entry is one piano, and a piano cannot gain sub-devices. There is nothing
+      to discover dynamically.
+  entity-category:
+    status: done
+    comment: The test chord button is diagnostic.
+  entity-device-class:
+    status: done
+    comment: |
+      The media player is a speaker. Select and button have no applicable device class in
+      Home Assistant.
+  entity-disabled-by-default:
+    status: done
+    comment: |
+      The test chord button is disabled by default, because pressing it makes a noise and
+      that is not something to trigger accidentally while browsing the device page.
+  entity-translations:
+    status: done
+  exception-translations:
+    status: done
+  icon-translations:
+    status: done
+  reconfiguration-flow:
+    status: done
+    comment: |
+      Refuses to repoint an entry at a different piano, since the entry's entities and
+      history belong to the instrument it was created for.
+  repair-issues:
+    status: exempt
+    comment: |
+      No condition the user can act on is detectable. An unreachable piano is already
+      surfaced as unavailable, which is the right severity for a device that is simply
+      switched off at the wall.
+  stale-devices:
+    status: exempt
+    comment: |
+      One device per config entry, removed with the entry. There is no device list that
+      can go stale.
+
+  # ---------------------------------------------------------------- Platinum
+  async-dependency:
+    status: done
+    comment: aiodisklavier is async throughout, built on aiohttp.
+  inject-websession:
+    status: done
+    comment: |
+      The client takes the caller's aiohttp session; the integration passes Home
+      Assistant's shared one via async_get_clientsession.
+  strict-typing:
+    status: done
+    comment: |
+      Fully annotated and checked with mypy --strict in CI. aiodisklavier ships a PEP 561
+      py.typed marker, so its types reach this integration rather than being silently Any.

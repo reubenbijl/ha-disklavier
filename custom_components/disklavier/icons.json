@@ -1,0 +1,18 @@
+{
+  "entity": {
+    "button": {
+      "test_chord": {
+        "default": "mdi:music-note"
+      }
+    },
+    "select": {
+      "quiet_mode": {
+        "default": "mdi:piano",
+        "state": {
+          "acoustic": "mdi:piano",
+          "quiet": "mdi:volume-off"
+        }
+      }
+    }
+  }
+}

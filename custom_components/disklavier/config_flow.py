@@ -13,7 +13,6 @@ from aiodisklavier import (
     DisklavierError,
     StaticInfo,
 )
-
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_HOST
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -36,10 +35,22 @@ class DisklavierConfigFlow(ConfigFlow, domain=DOMAIN):
         self._host: str | None = None
         self._static_info: StaticInfo | None = None
 
-    async def _async_probe(self, host: str) -> StaticInfo:
-        """Fetch the piano's identity, to prove it is reachable and really a Disklavier."""
+    async def _async_validate(self, host: str) -> tuple[StaticInfo | None, str | None]:
+        """Probe a host, returning either its identity or an error key.
+
+        Fetching static_info proves three things at once: the address is reachable, it
+        speaks the open API, and it is a Disklavier rather than some other device.
+        """
         client = Disklavier(host, async_get_clientsession(self.hass))
-        return await client.async_get_static_info()
+        try:
+            return await client.async_get_static_info(), None
+        except DisklavierConnectionError:
+            return None, "cannot_connect"
+        except DisklavierError:
+            return None, "invalid_response"
+        except Exception:
+            _LOGGER.exception("Unexpected error connecting to Disklavier at %s", host)
+            return None, "unknown"
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -49,25 +60,52 @@ class DisklavierConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             host = user_input[CONF_HOST]
-            try:
-                static_info = await self._async_probe(host)
-            except DisklavierConnectionError:
-                errors["base"] = "cannot_connect"
-            except DisklavierError:
-                errors["base"] = "invalid_response"
-            except Exception:
-                _LOGGER.exception("Unexpected error connecting to Disklavier")
-                errors["base"] = "unknown"
-            else:
+            static_info, error = await self._async_validate(host)
+            if static_info is not None:
                 await self.async_set_unique_id(static_info.disklavier_id)
                 self._abort_if_unique_id_configured(updates={CONF_HOST: host})
                 return self.async_create_entry(
                     title=f"Disklavier {static_info.model}",
                     data={CONF_HOST: host},
                 )
+            assert error is not None
+            errors["base"] = error
 
         return self.async_show_form(
             step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Let the user point an existing entry at a new address.
+
+        Useful when the piano's DHCP lease changes and it is not rediscovered: the entry
+        keeps its entities and history rather than having to be removed and re-added.
+        """
+        errors: dict[str, str] = {}
+        entry = self._get_reconfigure_entry()
+
+        if user_input is not None:
+            host = user_input[CONF_HOST]
+            static_info, error = await self._async_validate(host)
+            if static_info is not None:
+                # Refuse to repoint an entry at a *different* piano: its entities and
+                # history belong to the instrument the entry was created for.
+                await self.async_set_unique_id(static_info.disklavier_id)
+                self._abort_if_unique_id_mismatch(reason="wrong_piano")
+                return self.async_update_reload_and_abort(
+                    entry, data_updates={CONF_HOST: host}
+                )
+            assert error is not None
+            errors["base"] = error
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=self.add_suggested_values_to_schema(
+                STEP_USER_DATA_SCHEMA, {CONF_HOST: entry.data[CONF_HOST]}
+            ),
+            errors=errors,
         )
 
     async def async_step_ssdp(
@@ -78,18 +116,17 @@ class DisklavierConfigFlow(ConfigFlow, domain=DOMAIN):
         if not host:
             return self.async_abort(reason="cannot_connect")
 
-        try:
-            static_info = await self._async_probe(host)
-        except DisklavierError:
+        static_info, _ = await self._async_validate(host)
+        if static_info is None:
             return self.async_abort(reason="cannot_connect")
 
         await self.async_set_unique_id(static_info.disklavier_id)
+        # Rediscovery doubles as address tracking: an already-configured piano that comes
+        # back on a new IP has its entry updated instead of being offered again.
         self._abort_if_unique_id_configured(updates={CONF_HOST: host})
 
         self._host = host
         self._static_info = static_info
-
-        # Shown in the discovered-device card.
         self.context["title_placeholders"] = {"name": f"Disklavier {static_info.model}"}
         return await self.async_step_discovery_confirm()
 

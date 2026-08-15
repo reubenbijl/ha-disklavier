@@ -1,0 +1,30 @@
+# Mirrors Home Assistant core's own ruff configuration closely enough that code moving
+# into core needs no reformatting.
+target-version = "py313"
+line-length = 88
+
+[lint]
+select = [
+  "F", "E", "W", "I", "UP", "B", "C4", "SIM", "RUF",
+  "D",      # pydocstyle -- core requires docstrings everywhere
+  "ANN",    # annotations, for the strict-typing rule
+  "ASYNC",
+  "PT",
+  "RET",
+  "TID",
+]
+ignore = [
+  "D203", "D213",
+  "ANN401",
+  # ruff format owns code width and never reflows prose.
+  "E501",
+  # Home Assistant entity classes declare _attr_* as plain class attributes; the
+  # base classes type them as instance variables, so ClassVar is a type error.
+  "RUF012",
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["ANN001", "ANN201", "D103"]
+
+[lint.pydocstyle]
+convention = "pep257"
