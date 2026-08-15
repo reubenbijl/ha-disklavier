@@ -16,8 +16,9 @@ Verified against firmware **5.24.00** on a Disklavier ENSPIRE PRO grand.
   `aiodisklavier`'s one-shot notify helper, which restores whatever was playing afterwards.
 - **Silence it on a schedule** — switch to quiet mode after bedtime so the keys still move
   but the hammers do not strike.
-- **Browse and play the whole library** from the Home Assistant media browser: the built-in
-  songs, your recordings, downloaded songs, the PC sharing folder, playlists, and radio.
+- **Browse and play the whole library** from the Home Assistant media browser, with each
+  library's folder structure intact: the built-in songs, My Songs, your recordings,
+  downloaded songs, the PC sharing folder, playlists, the demo playlist, and radio.
 - **See what it is playing** on a dashboard, with title, artist, position and duration.
 
 ## Supported devices

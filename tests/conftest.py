@@ -123,6 +123,8 @@ def mock_client(
         Song(song_id=1, title="Angel"),
         Song(song_id=2, title="Beyond the Sea"),
     ]
+    client.async_get_albums.return_value = []
+    client.async_get_songs_in_album.return_value = []
     client.async_get_playlists.return_value = []
     client.async_get_playlist_items.return_value = []
     client.async_get_radio_channels.return_value = []

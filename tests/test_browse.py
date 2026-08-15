@@ -7,11 +7,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 from aiodisklavier import (
+    Album,
     DisklavierConnectionError,
     DisklavierResponseError,
     Playlist,
     RadioChannel,
     Song,
+    SongGroup,
 )
 from homeassistant.components.media_player import BrowseMedia
 from homeassistant.const import ATTR_ENTITY_ID, STATE_UNAVAILABLE
@@ -35,6 +37,66 @@ async def _browse(hass: HomeAssistant, content_id: str | None = None) -> BrowseM
 # ----------------------------------------------------------------------
 # Browsing each kind of node
 # ----------------------------------------------------------------------
+
+
+async def test_browse_a_library_lists_its_folders(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """A library with folders shows the folders, each playable and expandable.
+
+    Fetched from the piano's album list: genre collections in the built-in library,
+    directories in the PC sharing folder. The flat song list is not consulted at all.
+    """
+    mock_client.async_get_albums.return_value = [
+        Album(album_id=1, title="Pop"),
+        Album(album_id=5, title=""),
+    ]
+
+    node = await _browse(hass, "library/built_in_songs")
+    assert [child.title for child in node.children] == ["Pop", "(Root)"]
+    assert node.children[0].media_content_id == "album/built_in_songs/1"
+    assert all(child.can_play for child in node.children)
+    assert all(child.can_expand for child in node.children)
+    mock_client.async_get_songs.assert_not_awaited()
+
+
+async def test_browse_inside_a_folder(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """Expanding a folder lists its songs, under the folder's own name."""
+    mock_client.async_get_albums.return_value = [
+        Album(album_id=9, title="50 Greats for the Piano")
+    ]
+    mock_client.async_get_songs_in_album.return_value = [
+        Song(song_id=250, title="Invention 1")
+    ]
+
+    node = await _browse(hass, "album/built_in_songs/9")
+    assert node.title == "50 Greats for the Piano"
+    assert node.can_play is True
+    assert [child.title for child in node.children] == ["Invention 1"]
+    assert node.children[0].media_content_id == "song/built_in_songs/250"
+    mock_client.async_get_songs_in_album.assert_awaited_once_with(
+        9, SongGroup.BUILT_IN_SONGS
+    )
+
+
+@pytest.mark.parametrize("albums", [[Album(album_id=5, title="")], []])
+async def test_browse_an_unnamed_folder(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_client: AsyncMock,
+    albums: list[Album],
+) -> None:
+    """A folder with no name still gets a readable one.
+
+    The piano keeps a library's root-level files in an album with an empty title, and a
+    stale id may name a folder the piano no longer reports at all.
+    """
+    mock_client.async_get_albums.return_value = albums
+
+    node = await _browse(hass, "album/pc_sharing_folder/5")
+    assert node.title == "(Root)"
 
 
 async def test_browse_playlists(
@@ -80,7 +142,9 @@ async def test_browse_radio(
 @pytest.mark.parametrize(
     ("content_id", "method"),
     [
+        ("library/built_in_songs", "async_get_albums"),
         ("library/built_in_songs", "async_get_songs"),
+        ("album/built_in_songs/9", "async_get_songs_in_album"),
         ("playlists/playlists", "async_get_playlists"),
         ("playlist/playlists/1", "async_get_playlist_items"),
         ("radio", "async_get_radio_channels"),

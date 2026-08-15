@@ -10,6 +10,7 @@ from aiodisklavier import (
     DisklavierError,
     PlaylistGroup,
     PowerStatus,
+    Song,
     SongGroup,
 )
 from aiodisklavier import RepeatMode as DkvRepeat
@@ -55,6 +56,10 @@ _PLAYLIST_LIBRARIES: list[tuple[PlaylistGroup, str]] = [
     (PlaylistGroup.PLAYLISTS, "Playlists"),
     (PlaylistGroup.DEMO_PLAYLIST, "Demo Playlist"),
 ]
+
+#: Shown for the piano's unnamed album, which holds the files at a library's root.
+#: "(Root)" is what Yamaha's own ENSPIRE controller calls it.
+_UNNAMED_FOLDER = "(Root)"
 
 #: Disklavier repeat mode -> (Home Assistant repeat mode, shuffle).
 _REPEAT_TO_HA: dict[DkvRepeat, tuple[RepeatMode, bool]] = {
@@ -344,6 +349,9 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         try:
             if kind == "library":
                 return await self._browse_song_library(SongGroup(rest))
+            if kind == CONTENT_ALBUM:
+                group_name, _, album_id = rest.partition("/")
+                return await self._browse_album(SongGroup(group_name), int(album_id))
             if kind == "playlists":
                 return await self._browse_playlist_library(PlaylistGroup(rest))
             if kind == CONTENT_PLAYLIST:
@@ -417,12 +425,37 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         )
 
     async def _browse_song_library(self, group: SongGroup) -> BrowseMedia:
-        """List the songs in one library.
+        """List one library: its folders, or its songs where it reports no folders.
 
-        An empty library comes back as an empty list from the client, so anything raising
-        here is a real fault and is reported as one.
+        The piano files every library into albums -- genre collections in the built-in
+        library, directories in the PC sharing folder, "Recorded Songs" and "Kept Songs"
+        for recordings -- so those are what browsing a library shows. A library with no
+        albums is listed flat. An empty library comes back as an empty list from the
+        client, so anything raising here is a real fault and is reported as one.
         """
-        songs = await self.coordinator.client.async_get_songs(group)
+        albums = await self.coordinator.client.async_get_albums(group)
+
+        children: list[BrowseMedia]
+        if albums:
+            children_class = MediaClass.DIRECTORY
+            children = [
+                BrowseMedia(
+                    title=album.title or _UNNAMED_FOLDER,
+                    media_class=MediaClass.DIRECTORY,
+                    media_content_type=MediaType.MUSIC,
+                    media_content_id=(
+                        f"{CONTENT_ALBUM}/{group.value}/{album.album_id}"
+                    ),
+                    can_play=True,
+                    can_expand=True,
+                )
+                for album in albums
+            ]
+        else:
+            children_class = MediaClass.TRACK
+            children = self._song_nodes(
+                group, await self.coordinator.client.async_get_songs(group)
+            )
 
         return BrowseMedia(
             title=dict(_SONG_LIBRARIES).get(group, group.value),
@@ -431,19 +464,40 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
             media_content_id=f"library/{group.value}",
             can_play=False,
             can_expand=True,
-            children_media_class=MediaClass.TRACK,
-            children=[
-                BrowseMedia(
-                    title=song.title,
-                    media_class=MediaClass.TRACK,
-                    media_content_type=MediaType.MUSIC,
-                    media_content_id=f"{CONTENT_SONG}/{group.value}/{song.song_id}",
-                    can_play=True,
-                    can_expand=False,
-                )
-                for song in songs
-            ],
+            children_media_class=children_class,
+            children=children,
         )
+
+    async def _browse_album(self, group: SongGroup, album_id: int) -> BrowseMedia:
+        """List the songs inside one folder of a library."""
+        albums = await self.coordinator.client.async_get_albums(group)
+        songs = await self.coordinator.client.async_get_songs_in_album(album_id, group)
+        title = next((a.title for a in albums if a.album_id == album_id), "")
+
+        return BrowseMedia(
+            title=title or _UNNAMED_FOLDER,
+            media_class=MediaClass.DIRECTORY,
+            media_content_type=MediaType.MUSIC,
+            media_content_id=f"{CONTENT_ALBUM}/{group.value}/{album_id}",
+            can_play=True,
+            can_expand=True,
+            children_media_class=MediaClass.TRACK,
+            children=self._song_nodes(group, songs),
+        )
+
+    def _song_nodes(self, group: SongGroup, songs: list[Song]) -> list[BrowseMedia]:
+        """Build playable track nodes for the songs of one library or folder."""
+        return [
+            BrowseMedia(
+                title=song.title,
+                media_class=MediaClass.TRACK,
+                media_content_type=MediaType.MUSIC,
+                media_content_id=f"{CONTENT_SONG}/{group.value}/{song.song_id}",
+                can_play=True,
+                can_expand=False,
+            )
+            for song in songs
+        ]
 
     async def _browse_playlist_library(self, group: PlaylistGroup) -> BrowseMedia:
         """List the playlists in one library."""

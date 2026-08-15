@@ -361,7 +361,7 @@ async def test_browse_root_lists_the_libraries(
 async def test_browse_a_library_lists_songs(
     hass: HomeAssistant, init_integration: MockConfigEntry
 ) -> None:
-    """Expanding a library lists playable songs."""
+    """A library that reports no folders falls back to listing its songs flat."""
     component = hass.data["entity_components"]["media_player"]
     entity = component.get_entity(ENTITY)
 
