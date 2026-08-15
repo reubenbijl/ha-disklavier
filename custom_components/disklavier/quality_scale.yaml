@@ -1,3 +1,13 @@
+# Home Assistant's integration quality scale, tracked rule by rule.
+#
+# The `quality_scale` key is deliberately absent from manifest.json. The scale is only
+# formally assessed for integrations in home-assistant/core, so declaring a tier in a
+# HACS integration asserts a badge nobody verifies. This file is the honest record: the
+# code is built to platinum, and every rule below says so or says why it is exempt.
+#
+# One rule cannot be satisfied from this repository: `brands` needs a pull request to
+# home-assistant/brands. Source artwork is in assets/.
+
 rules:
   # ------------------------------------------------------------------ Bronze
   action-setup:
