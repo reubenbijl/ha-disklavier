@@ -1,0 +1,45 @@
+{
+  "config": {
+    "abort": {
+      "already_configured": "Device is already configured",
+      "cannot_connect": "Failed to connect"
+    },
+    "error": {
+      "cannot_connect": "Failed to connect",
+      "invalid_response": "The device answered, but it does not look like a Disklavier ENSPIRE.",
+      "unknown": "Unexpected error"
+    },
+    "step": {
+      "discovery_confirm": {
+        "description": "Do you want to add the Disklavier {model} at {host} to Home Assistant?",
+        "title": "Add your Disklavier"
+      },
+      "user": {
+        "data": {
+          "host": "Host"
+        },
+        "data_description": {
+          "host": "The address of the piano on your network. You can find this under Settings, Network on the piano itself."
+        },
+        "description": "Enter the hostname or IP address of your Yamaha Disklavier ENSPIRE.",
+        "title": "Connect to your Disklavier"
+      }
+    }
+  },
+  "entity": {
+    "button": {
+      "test_chord": {
+        "name": "Play test chord"
+      }
+    },
+    "select": {
+      "quiet_mode": {
+        "name": "Quiet mode",
+        "state": {
+          "acoustic": "Acoustic",
+          "quiet": "Quiet"
+        }
+      }
+    }
+  }
+}
