@@ -81,6 +81,82 @@ async def test_browse_inside_a_folder(
     )
 
 
+async def test_path_titled_folders_become_nested_directories(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """Albums titled with / separators split into a virtual directory tree.
+
+    The piano's indexer flattens nested directories into path-like album titles, so
+    one level of the browse tree shows one path segment.
+    """
+    mock_client.async_get_albums.return_value = [
+        Album(album_id=1, title="Pop"),
+        Album(album_id=2, title="ImpromptuApp/Alban Berg"),
+        Album(album_id=3, title="ImpromptuApp/Chopin"),
+        Album(album_id=4, title="Deep/A/B"),
+        Album(album_id=5, title=""),
+    ]
+
+    root = await _browse(hass, "library/pc_sharing_folder")
+    assert [child.title for child in root.children] == [
+        "Pop",
+        "ImpromptuApp",
+        "Deep",
+        "(Root)",
+    ]
+    impromptu = root.children[1]
+    assert impromptu.media_content_id == "album_dir/pc_sharing_folder/ImpromptuApp"
+    assert impromptu.can_play is False
+    assert impromptu.can_expand is True
+
+    level = await _browse(hass, "album_dir/pc_sharing_folder/ImpromptuApp")
+    assert level.title == "ImpromptuApp"
+    assert level.can_play is False
+    assert [child.title for child in level.children] == ["Alban Berg", "Chopin"]
+    assert level.children[0].media_content_id == "album/pc_sharing_folder/2"
+    assert all(child.can_play for child in level.children)
+
+    deep = await _browse(hass, "album_dir/pc_sharing_folder/Deep")
+    assert [child.title for child in deep.children] == ["A"]
+    assert deep.children[0].media_content_id == "album_dir/pc_sharing_folder/Deep/A"
+
+    leaf_level = await _browse(hass, "album_dir/pc_sharing_folder/Deep/A")
+    assert [child.title for child in leaf_level.children] == ["B"]
+    assert leaf_level.children[0].media_content_id == "album/pc_sharing_folder/4"
+
+
+async def test_an_album_named_like_a_directory_is_listed_in_it(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """An album whose full title equals a virtual directory path stays reachable."""
+    mock_client.async_get_albums.return_value = [
+        Album(album_id=1, title="X"),
+        Album(album_id=2, title="X/Y"),
+    ]
+
+    root = await _browse(hass, "library/pc_sharing_folder")
+    assert [child.title for child in root.children] == ["X", "X"]
+
+    level = await _browse(hass, "album_dir/pc_sharing_folder/X")
+    assert [(child.title, child.media_content_id) for child in level.children] == [
+        ("X", "album/pc_sharing_folder/1"),
+        ("Y", "album/pc_sharing_folder/2"),
+    ]
+
+
+async def test_browse_album_shows_the_last_path_segment(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """A path-titled album's own page is named by its final segment."""
+    mock_client.async_get_albums.return_value = [
+        Album(album_id=7, title="ImpromptuApp/Alban Berg")
+    ]
+    mock_client.async_get_songs_in_album.return_value = []
+
+    node = await _browse(hass, "album/pc_sharing_folder/7")
+    assert node.title == "Alban Berg"
+
+
 @pytest.mark.parametrize("albums", [[Album(album_id=5, title="")], []])
 async def test_browse_an_unnamed_folder(
     hass: HomeAssistant,

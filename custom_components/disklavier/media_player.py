@@ -7,6 +7,7 @@ from typing import Any
 
 from aiodisklavier import (
     VOLUME_MAX,
+    Album,
     DisklavierError,
     PlaylistGroup,
     PowerStatus,
@@ -349,6 +350,9 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         try:
             if kind == "library":
                 return await self._browse_song_library(SongGroup(rest))
+            if kind == "album_dir":
+                group_name, _, dir_path = rest.partition("/")
+                return await self._browse_album_dir(SongGroup(group_name), dir_path)
             if kind == CONTENT_ALBUM:
                 group_name, _, album_id = rest.partition("/")
                 return await self._browse_album(SongGroup(group_name), int(album_id))
@@ -438,19 +442,7 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         children: list[BrowseMedia]
         if albums:
             children_class = MediaClass.DIRECTORY
-            children = [
-                BrowseMedia(
-                    title=album.title or _UNNAMED_FOLDER,
-                    media_class=MediaClass.DIRECTORY,
-                    media_content_type=MediaType.MUSIC,
-                    media_content_id=(
-                        f"{CONTENT_ALBUM}/{group.value}/{album.album_id}"
-                    ),
-                    can_play=True,
-                    can_expand=True,
-                )
-                for album in albums
-            ]
+            children = self._album_level_nodes(group, albums, "")
         else:
             children_class = MediaClass.TRACK
             children = self._song_nodes(
@@ -468,11 +460,87 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
             children=children,
         )
 
+    async def _browse_album_dir(self, group: SongGroup, path: str) -> BrowseMedia:
+        """List one level of the virtual folder tree within a library.
+
+        These levels have no ids of their own on the piano; they exist only as the
+        ``/``-separated prefixes of album titles.
+        """
+        albums = await self.coordinator.client.async_get_albums(group)
+
+        return BrowseMedia(
+            title=path.rsplit("/", 1)[-1],
+            media_class=MediaClass.DIRECTORY,
+            media_content_type=MediaType.MUSIC,
+            media_content_id=f"album_dir/{group.value}/{path}",
+            can_play=False,
+            can_expand=True,
+            children_media_class=MediaClass.DIRECTORY,
+            children=self._album_level_nodes(group, albums, path),
+        )
+
+    def _album_level_nodes(
+        self, group: SongGroup, albums: list[Album], path: str
+    ) -> list[BrowseMedia]:
+        """Build one level of a library's folder tree.
+
+        The piano flattens nested directories into album titles with ``/`` separators
+        (``ImpromptuApp/Alban Berg``), so titles are split back into levels: an album
+        whose remaining title holds no separator is a playable folder of songs, and
+        every distinct leading segment becomes a virtual directory, kept in the
+        piano's own ordering at first appearance.
+        """
+        prefix = f"{path}/" if path else ""
+        seen_dirs: set[str] = set()
+        nodes: list[BrowseMedia] = []
+
+        for album in albums:
+            title = album.title
+            if path and title == path:
+                rest = title.rsplit("/", 1)[-1]
+            elif title.startswith(prefix):
+                rest = title[len(prefix) :]
+            else:
+                continue
+
+            head, sep, _ = rest.partition("/")
+            if sep:
+                if head not in seen_dirs:
+                    seen_dirs.add(head)
+                    dir_path = f"{prefix}{head}"
+                    nodes.append(
+                        BrowseMedia(
+                            title=head,
+                            media_class=MediaClass.DIRECTORY,
+                            media_content_type=MediaType.MUSIC,
+                            media_content_id=f"album_dir/{group.value}/{dir_path}",
+                            can_play=False,
+                            can_expand=True,
+                        )
+                    )
+            else:
+                nodes.append(
+                    BrowseMedia(
+                        title=head or _UNNAMED_FOLDER,
+                        media_class=MediaClass.DIRECTORY,
+                        media_content_type=MediaType.MUSIC,
+                        media_content_id=(
+                            f"{CONTENT_ALBUM}/{group.value}/{album.album_id}"
+                        ),
+                        can_play=True,
+                        can_expand=True,
+                    )
+                )
+        return nodes
+
     async def _browse_album(self, group: SongGroup, album_id: int) -> BrowseMedia:
         """List the songs inside one folder of a library."""
         albums = await self.coordinator.client.async_get_albums(group)
         songs = await self.coordinator.client.async_get_songs_in_album(album_id, group)
         title = next((a.title for a in albums if a.album_id == album_id), "")
+        # Path-titled albums ("ImpromptuApp/Alban Berg") show just their last segment;
+        # the parents are rendered as the virtual folder levels above this page.
+        title = title.rsplit("/", 1)[-1]
 
         return BrowseMedia(
             title=title or _UNNAMED_FOLDER,
