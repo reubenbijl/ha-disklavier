@@ -246,6 +246,22 @@ async def test_browse_reports_a_failing_library(
     assert err.value.translation_key == "browse_failed"
 
 
+async def test_browse_surprise_me_lists_genres(
+    hass: HomeAssistant, init_integration: MockConfigEntry
+) -> None:
+    """Surprise Me offers one playable random pick per built-in genre."""
+    root = await _browse(hass)
+    assert "Surprise Me" in [child.title for child in root.children]
+
+    node = await _browse(hass, "random")
+    assert node.can_play is False
+    assert len(node.children) == 11
+    jazz = next(child for child in node.children if child.title == "Jazz")
+    assert jazz.media_content_id == "random/jazz"
+    assert jazz.can_play is True
+    assert jazz.can_expand is False
+
+
 async def test_browse_rejects_an_unknown_group(
     hass: HomeAssistant, init_integration: MockConfigEntry
 ) -> None:

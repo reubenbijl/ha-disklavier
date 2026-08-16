@@ -11,6 +11,7 @@ from aiodisklavier import (
     Disklavier,
     DisklavierConnectionError,
     DisklavierError,
+    LibrarySong,
     MasterState,
     StaticInfo,
 )
@@ -37,6 +38,10 @@ class DisklavierData:
 
     current: CurrentInfo
     master: MasterState | None
+    #: What the piano's own database says about the loaded song -- most usefully its
+    #: media format. ``None`` when nothing is loaded, or when ``master`` is unavailable
+    #: (the loaded song's identity only exists there).
+    song: LibrarySong | None
     #: When this poll completed. The media player reports it as
     #: ``media_position_updated_at`` so the UI can extrapolate playback position between
     #: polls instead of stepping it every five seconds.
@@ -78,6 +83,10 @@ class DisklavierCoordinator(DataUpdateCoordinator[DisklavierData]):
                 f"Unexpected response from the Disklavier: {err}"
             ) from err
 
+        # Anchor position extrapolation to the moment the position was actually read,
+        # not to whenever the follow-up fetches finish.
+        fetched_at = dt_util.utcnow()
+
         master: MasterState | None = None
         try:
             master = await self.client.async_get_master_state()
@@ -90,6 +99,22 @@ class DisklavierCoordinator(DataUpdateCoordinator[DisklavierData]):
                 )
                 self._master_warned = True
 
+        song: LibrarySong | None = None
+        if (
+            master is not None
+            and master.song_prefix is not None
+            and master.song_id is not None
+        ):
+            try:
+                song = await self.client.async_lookup_song(
+                    master.song_prefix, master.song_id
+                )
+            except DisklavierError:
+                # Best-effort for the same reason: the song database is the internal
+                # endpoint tier, and everything except the song-type sensor works
+                # without it.
+                song = None
+
         return DisklavierData(
-            current=current, master=master, fetched_at=dt_util.utcnow()
+            current=current, master=master, song=song, fetched_at=fetched_at
         )

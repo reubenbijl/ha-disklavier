@@ -70,8 +70,9 @@ on the piano; the integration only ever reads and sends commands.
 
 | Entity | Platform | What it does |
 |---|---|---|
-| Disklavier | `media_player` | Play, pause, stop, next, previous, seek, volume, mute-by-volume, repeat and shuffle, power, and the full media browser |
+| Disklavier | `media_player` | Play, pause, stop, next, previous, seek, volume, repeat and shuffle, power, search, and the full media browser |
 | Quiet mode | `select` | **Acoustic** or **Quiet** — whether the hammers physically strike the strings |
+| Song type | `sensor` | What the loaded song is: **PianoSoft solo**, **PianoSoft Plus**, **PianoSoft PlusAudio**, **MIDI file** or **Audio** — with an `audio_output` attribute saying whether playback uses the speakers. Trigger a receiver on it |
 | Play test chord | `button` | Sounds a chord to confirm the piano is responding. Disabled by default, because pressing it makes a noise |
 
 ## Playing something specific
@@ -84,8 +85,14 @@ album/<group>/<id>
 playlist/<group>/<id>
 playlist_item/<group>/<id>
 radio/<channel_id>
+random/<genre>                 e.g. random/jazz — the piano picks
 search/<title>                 e.g. search/Clair de lune
 ```
+
+The media browser also has a **search box** (and voice assistants can use the same
+search): results come ranked from the piano's own song database, cover every library,
+playlists and radio, and play by exact id. `search/<title>` remains for scripts — it is a
+single fuzzy pick made by the piano itself, sight unseen.
 
 `search/` is a fuzzy title match run on the piano itself, which makes it the practical choice
 for voice assistants and scripts — you do not need to know any ids:
@@ -124,6 +131,30 @@ automation:
         data:
           media_content_type: music
           media_content_id: search/Clair de lune
+```
+
+Turn the receiver on when a PianoSoft song with audio starts:
+
+```yaml
+automation:
+  - alias: Receiver follows the piano
+    triggers:
+      - trigger: state
+        entity_id: media_player.disklavier_pro
+        to: playing
+    conditions:
+      - condition: state
+        entity_id: sensor.disklavier_pro_song_type
+        state: ["plus", "plus_audio", "audio"]
+    actions:
+      - action: media_player.turn_on
+        target:
+          entity_id: media_player.receiver
+      - action: media_player.select_source
+        target:
+          entity_id: media_player.receiver
+        data:
+          source: Piano
 ```
 
 Silence the room after bedtime without stopping playback:

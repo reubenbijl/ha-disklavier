@@ -4,7 +4,7 @@ pytest-homeassistant-custom-component
 
 # The integration's runtime dependency, pinned to exactly what manifest.json declares so
 # the suite exercises the version Home Assistant will actually install.
-aiodisklavier==0.1.1
+aiodisklavier==0.2.1
 
 # Quality tooling, matching what CI runs.
 ruff

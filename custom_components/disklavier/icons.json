@@ -13,6 +13,18 @@
           "quiet": "mdi:volume-off"
         }
       }
+    },
+    "sensor": {
+      "song_type": {
+        "default": "mdi:file-music",
+        "state": {
+          "solo": "mdi:piano",
+          "plus": "mdi:piano",
+          "plus_audio": "mdi:speaker",
+          "audio": "mdi:speaker",
+          "midi": "mdi:midi"
+        }
+      }
     }
   }
 }

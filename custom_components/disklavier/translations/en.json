@@ -53,6 +53,18 @@
           "quiet": "Quiet"
         }
       }
+    },
+    "sensor": {
+      "song_type": {
+        "name": "Song type",
+        "state": {
+          "audio": "Audio",
+          "midi": "MIDI file",
+          "plus": "PianoSoft Plus",
+          "plus_audio": "PianoSoft PlusAudio",
+          "solo": "PianoSoft solo"
+        }
+      }
     }
   },
   "exceptions": {

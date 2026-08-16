@@ -9,8 +9,11 @@ from aiodisklavier import (
     VOLUME_MAX,
     Album,
     DisklavierError,
+    Genre,
+    GenreSelect,
     PlaylistGroup,
     PowerStatus,
+    SearchKind,
     Song,
     SongGroup,
 )
@@ -24,6 +27,8 @@ from homeassistant.components.media_player import (
     MediaPlayerState,
     MediaType,
     RepeatMode,
+    SearchMedia,
+    SearchMediaQuery,
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
@@ -34,6 +39,7 @@ from .const import (
     CONTENT_PLAYLIST,
     CONTENT_PLAYLIST_ITEM,
     CONTENT_RADIO,
+    CONTENT_RANDOM,
     CONTENT_SEARCH,
     CONTENT_SONG,
     DOMAIN,
@@ -61,6 +67,22 @@ _PLAYLIST_LIBRARIES: list[tuple[PlaylistGroup, str]] = [
 #: Shown for the piano's unnamed album, which holds the files at a library's root.
 #: "(Root)" is what Yamaha's own ENSPIRE controller calls it.
 _UNNAMED_FOLDER = "(Root)"
+
+#: Built-in genres offered under "Surprise Me", in the piano's own menu order. Each
+#: node asks the piano itself to pick a random song from that genre.
+_RANDOM_GENRES: list[tuple[Genre, str]] = [
+    (Genre.POP, "Pop"),
+    (Genre.ROCK, "Rock"),
+    (Genre.JAZZ, "Jazz"),
+    (Genre.RNB_SOUL, "R&B / Soul"),
+    (Genre.CLASSICAL, "Classical"),
+    (Genre.COUNTRY, "Country"),
+    (Genre.HOLIDAYS, "Holidays"),
+    (Genre.SOUNDTRACK, "Soundtrack"),
+    (Genre.PIANO50, "50 Greats for the Piano"),
+    (Genre.LESSON, "Lesson"),
+    (Genre.SMARTKEY, "SmartKey"),
+]
 
 #: Disklavier repeat mode -> (Home Assistant repeat mode, shuffle).
 _REPEAT_TO_HA: dict[DkvRepeat, tuple[RepeatMode, bool]] = {
@@ -119,6 +141,7 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         | MediaPlayerEntityFeature.PLAY_MEDIA
         | MediaPlayerEntityFeature.REPEAT_SET
         | MediaPlayerEntityFeature.SHUFFLE_SET
+        | MediaPlayerEntityFeature.SEARCH_MEDIA
     )
 
     def __init__(self, coordinator: DisklavierCoordinator) -> None:
@@ -309,6 +332,7 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
             playlist/<group>/<id>
             playlist_item/<group>/<id>
             radio/<channel_id>
+            random/<genre>
             search/<title>
         """
         client = self.coordinator.client
@@ -317,6 +341,11 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         try:
             if kind == CONTENT_SEARCH:
                 await self._async_call(client.async_play_search(rest))
+                return
+            if kind == CONTENT_RANDOM:
+                await self._async_call(
+                    client.async_play_genre(Genre(rest), select=GenreSelect.RANDOM)
+                )
                 return
             if kind == CONTENT_RADIO:
                 await self._async_call(client.async_play_radio(int(rest)))
@@ -388,6 +417,8 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
                 )
             if kind == CONTENT_RADIO:
                 return await self._browse_radio()
+            if kind == CONTENT_RANDOM:
+                return self._browse_random()
         except DisklavierError as err:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
@@ -437,6 +468,16 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
                 media_class=MediaClass.DIRECTORY,
                 media_content_type=MediaType.MUSIC,
                 media_content_id=CONTENT_RADIO,
+                can_play=False,
+                can_expand=True,
+            )
+        )
+        children.append(
+            BrowseMedia(
+                title="Surprise Me",
+                media_class=MediaClass.DIRECTORY,
+                media_content_type=MediaType.MUSIC,
+                media_content_id=CONTENT_RANDOM,
                 can_play=False,
                 can_expand=True,
             )
@@ -647,6 +688,106 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
                 for item in items
             ],
         )
+
+    def _browse_random(self) -> BrowseMedia:
+        """List the Surprise Me nodes: one random pick per built-in genre.
+
+        The randomness is the piano's own -- ``select=random`` in the firmware -- so
+        this browse level needs no request at all.
+        """
+        return BrowseMedia(
+            title="Surprise Me",
+            media_class=MediaClass.DIRECTORY,
+            media_content_type=MediaType.MUSIC,
+            media_content_id=CONTENT_RANDOM,
+            can_play=False,
+            can_expand=True,
+            children_media_class=MediaClass.TRACK,
+            children=[
+                BrowseMedia(
+                    title=title,
+                    media_class=MediaClass.TRACK,
+                    media_content_type=MediaType.MUSIC,
+                    media_content_id=f"{CONTENT_RANDOM}/{genre.value}",
+                    can_play=True,
+                    can_expand=False,
+                )
+                for genre, title in _RANDOM_GENRES
+            ],
+        )
+
+    # ------------------------------------------------------------------
+    # Searching
+    # ------------------------------------------------------------------
+
+    async def async_search_media(self, query: SearchMediaQuery) -> SearchMedia:
+        """Search the piano's libraries, playlists and radio channels by title.
+
+        The ranking runs in aiodisklavier over the piano's own song database, so one
+        fetch covers every library and each result plays by exact id -- unlike the
+        firmware's ``search_title``, which plays its single fuzzy pick sight unseen.
+        """
+        try:
+            results = await self.coordinator.client.async_search(query.search_query)
+        except DisklavierError as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="browse_failed",
+                translation_placeholders={"error": str(err)},
+            ) from err
+
+        items: list[BrowseMedia] = []
+        for result in results:
+            if (
+                result.kind is SearchKind.SONG
+                and result.song is not None
+                and result.song.group is not None
+            ):
+                items.append(
+                    BrowseMedia(
+                        title=result.title,
+                        media_class=MediaClass.TRACK,
+                        media_content_type=MediaType.MUSIC,
+                        media_content_id=(
+                            f"{CONTENT_SONG}/{result.song.group.value}"
+                            f"/{result.song.song_id}"
+                        ),
+                        can_play=True,
+                        can_expand=False,
+                    )
+                )
+            elif (
+                result.kind is SearchKind.PLAYLIST
+                and result.playlist is not None
+                and result.playlist_group is not None
+            ):
+                items.append(
+                    BrowseMedia(
+                        title=result.title,
+                        media_class=MediaClass.PLAYLIST,
+                        media_content_type=MediaType.PLAYLIST,
+                        media_content_id=(
+                            f"{CONTENT_PLAYLIST}/{result.playlist_group.value}"
+                            f"/{result.playlist.playlist_id}"
+                        ),
+                        can_play=True,
+                        can_expand=True,
+                    )
+                )
+            elif result.kind is SearchKind.RADIO and result.channel is not None:
+                items.append(
+                    BrowseMedia(
+                        title=result.title,
+                        media_class=MediaClass.CHANNEL,
+                        media_content_type=MediaType.CHANNEL,
+                        media_content_id=(
+                            f"{CONTENT_RADIO}/{result.channel.channel_id}"
+                        ),
+                        can_play=True,
+                        can_expand=False,
+                    )
+                )
+        return SearchMedia(result=items)
 
     async def _browse_radio(self) -> BrowseMedia:
         """List the radio channels.

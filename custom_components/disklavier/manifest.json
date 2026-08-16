@@ -10,7 +10,7 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/reubenbijl/ha-disklavier/issues",
   "requirements": [
-    "aiodisklavier==0.1.1"
+    "aiodisklavier==0.2.1"
   ],
   "ssdp": [
     {

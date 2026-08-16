@@ -9,10 +9,18 @@ import pytest
 from aiodisklavier import (
     CurrentInfo,
     DisklavierCommandError,
+    Genre,
+    GenreSelect,
+    LibrarySong,
     PlaybackStatus,
+    Playlist,
     PlaylistGroup,
     PowerStatus,
+    RadioChannel,
     RepeatMode,
+    SearchKind,
+    SearchResult,
+    SongFormat,
     SongGroup,
 )
 from homeassistant.components.media_player import (
@@ -23,6 +31,7 @@ from homeassistant.components.media_player import (
     ATTR_MEDIA_SHUFFLE,
     ATTR_MEDIA_VOLUME_LEVEL,
     SERVICE_PLAY_MEDIA,
+    SearchMediaQuery,
 )
 from homeassistant.components.media_player import (
     DOMAIN as MP_DOMAIN,
@@ -403,6 +412,93 @@ async def test_play_media_rejects_bad_ids(
             blocking=True,
         )
     assert err.value.translation_key == "unsupported_media_id"
+
+
+async def test_play_media_random_genre(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """A Surprise Me pick asks the piano itself for a random song in the genre."""
+    await hass.services.async_call(
+        MP_DOMAIN,
+        SERVICE_PLAY_MEDIA,
+        {
+            ATTR_ENTITY_ID: ENTITY,
+            ATTR_MEDIA_CONTENT_TYPE: "music",
+            ATTR_MEDIA_CONTENT_ID: "random/jazz",
+        },
+        blocking=True,
+    )
+    mock_client.async_play_genre.assert_awaited_once_with(
+        Genre.JAZZ, select=GenreSelect.RANDOM
+    )
+
+
+# ----------------------------------------------------------------------
+# Searching
+# ----------------------------------------------------------------------
+
+
+async def test_search_media_maps_every_kind(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """Search results become playable browse items, one shape per kind."""
+    song = LibrarySong(
+        prefix="y",
+        song_id=24,
+        title="Clair de lune",
+        format=SongFormat.SMF_XG,
+        group=SongGroup.DOWNLOADED_SONGS,
+        album_id=2,
+        length_ms=300000,
+        genre="Classical",
+        composer="Claude Debussy",
+        performer=None,
+    )
+    mock_client.async_search.return_value = [
+        SearchResult(kind=SearchKind.SONG, title="Clair de lune", score=1.0, song=song),
+        SearchResult(
+            kind=SearchKind.PLAYLIST,
+            title="Clair de lune covers",
+            score=0.9,
+            playlist=Playlist(playlist_id=3, title="Clair de lune covers"),
+            playlist_group=PlaylistGroup.PLAYLISTS,
+        ),
+        SearchResult(
+            kind=SearchKind.RADIO,
+            title="Classical Romance",
+            score=0.7,
+            channel=RadioChannel(channel_id=5, title="Classical Romance"),
+        ),
+        # A malformed result -- no payload for its kind -- is skipped, not crashed on.
+        SearchResult(kind=SearchKind.SONG, title="Ghost", score=0.6),
+    ]
+
+    component = hass.data["entity_components"]["media_player"]
+    entity = component.get_entity(ENTITY)
+    media = await entity.async_search_media(
+        SearchMediaQuery(search_query="Clair de lune")
+    )
+
+    assert [item.media_content_id for item in media.result] == [
+        "song/downloaded_songs/24",
+        "playlist/playlists/3",
+        "radio/5",
+    ]
+    assert all(item.can_play for item in media.result)
+    mock_client.async_search.assert_awaited_once_with("Clair de lune")
+
+
+async def test_search_media_failure_is_translated(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """An unreachable piano turns into a localised error."""
+    mock_client.async_search.side_effect = DisklavierCommandError("nope")
+
+    component = hass.data["entity_components"]["media_player"]
+    entity = component.get_entity(ENTITY)
+    with pytest.raises(HomeAssistantError) as err:
+        await entity.async_search_media(SearchMediaQuery(search_query="x"))
+    assert err.value.translation_key == "browse_failed"
 
 
 # ----------------------------------------------------------------------

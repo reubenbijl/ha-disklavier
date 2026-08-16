@@ -8,12 +8,15 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from aiodisklavier import (
     CurrentInfo,
+    LibrarySong,
     MasterState,
     PlaybackStatus,
     PowerStatus,
     QuietMode,
     RepeatMode,
     Song,
+    SongFormat,
+    SongGroup,
     StaticInfo,
 )
 from homeassistant.config_entries import ConfigEntryState
@@ -91,6 +94,25 @@ def master_state() -> MasterState:
         metronome_beat="4/4",
         key_motion=True,
         tempo=100,
+        song_prefix="f",
+        song_id=3608,
+    )
+
+
+@pytest.fixture
+def library_song() -> LibrarySong:
+    """Return the loaded song as the piano's database describes it."""
+    return LibrarySong(
+        prefix="f",
+        song_id=3608,
+        title="Beethoven - Symphony No. 7, Movement 1.",
+        format=SongFormat.SMF_MP3,
+        group=SongGroup.PC_SHARING_FOLDER,
+        album_id=22,
+        length_ms=851900,
+        genre=None,
+        composer="Ludwig van Beethoven",
+        performer=None,
     )
 
 
@@ -107,7 +129,10 @@ def mock_config_entry() -> MockConfigEntry:
 
 @pytest.fixture
 def mock_client(
-    static_info: StaticInfo, current_info: CurrentInfo, master_state: MasterState
+    static_info: StaticInfo,
+    current_info: CurrentInfo,
+    master_state: MasterState,
+    library_song: LibrarySong,
 ) -> Generator[AsyncMock]:
     """Patch the Disklavier client everywhere the integration constructs one.
 
@@ -126,6 +151,8 @@ def mock_client(
     ]
     client.async_get_albums.return_value = []
     client.async_get_songs_in_album.return_value = []
+    client.async_lookup_song.return_value = library_song
+    client.async_search.return_value = []
     client.async_get_playlists.return_value = []
     client.async_get_playlist_items.return_value = []
     client.async_get_radio_channels.return_value = []
