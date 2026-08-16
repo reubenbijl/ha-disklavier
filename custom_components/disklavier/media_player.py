@@ -25,7 +25,7 @@ from homeassistant.components.media_player import (
     MediaType,
     RepeatMode,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -125,10 +125,28 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         """Initialise the media player."""
         super().__init__(coordinator)
         self._attr_unique_id = coordinator.static_info.disklavier_id
+        self._optimistic_state: MediaPlayerState | None = None
 
     # ------------------------------------------------------------------
     # State
     # ------------------------------------------------------------------
+
+    def _set_optimistic_state(self, state: MediaPlayerState) -> None:
+        """Show a transport command's expected outcome immediately.
+
+        The firmware reports the previous state for a moment after accepting a command,
+        so waiting for a poll leaves the button visibly lagging what the piano is
+        audibly doing. The next coordinator update clears this and the polled truth
+        wins.
+        """
+        self._optimistic_state = state
+        self.async_write_ha_state()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Let each real poll supersede any optimistic state."""
+        self._optimistic_state = None
+        super()._handle_coordinator_update()
 
     @property
     def state(self) -> MediaPlayerState:
@@ -137,6 +155,8 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         ``wakeup`` is reported as off: the piano is still ~12 seconds from accepting
         commands, so presenting it as on would invite failures.
         """
+        if self._optimistic_state is not None:
+            return self._optimistic_state
         current = self.coordinator.data.current
         if current.power_status in (PowerStatus.SLEEP, PowerStatus.WAKEUP):
             return MediaPlayerState.OFF
@@ -209,14 +229,17 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
     async def async_media_play(self) -> None:
         """Start playback."""
         await self._async_call(self.coordinator.client.async_play())
+        self._set_optimistic_state(MediaPlayerState.PLAYING)
 
     async def async_media_pause(self) -> None:
         """Pause playback."""
         await self._async_call(self.coordinator.client.async_pause())
+        self._set_optimistic_state(MediaPlayerState.PAUSED)
 
     async def async_media_stop(self) -> None:
         """Stop playback and rewind."""
         await self._async_call(self.coordinator.client.async_stop())
+        self._set_optimistic_state(MediaPlayerState.IDLE)
 
     async def async_media_next_track(self) -> None:
         """Skip to the next song."""

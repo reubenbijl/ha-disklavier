@@ -47,7 +47,10 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
 
 ENTITY = "media_player.disklavier_pro"
 
@@ -224,6 +227,71 @@ async def test_shuffle_wins_over_repeat(
         blocking=True,
     )
     mock_client.async_set_repeat.assert_awaited_once_with(RepeatMode.MEDIA_SHUFFLE)
+
+
+async def test_transport_commands_show_their_effect_immediately(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_client: AsyncMock,
+    freezer,
+) -> None:
+    """Play flips the state at once, and a forced refresh follows the settle.
+
+    The firmware reports the old state for a moment after accepting a command, so the
+    entity shows the command's expected outcome immediately, then a real refresh is
+    forced once the settle has passed -- undebounced, so it cannot be deferred past
+    the next scheduled poll. The polled truth then wins: the mock still reports a
+    paused piano, so the optimistic state clears.
+    """
+    polls_before = mock_client.async_get_current_info.await_count
+
+    await hass.services.async_call(
+        MP_DOMAIN, SERVICE_MEDIA_PLAY, {ATTR_ENTITY_ID: ENTITY}, blocking=True
+    )
+    assert hass.states.get(ENTITY).state == STATE_PLAYING
+    assert mock_client.async_get_current_info.await_count == polls_before
+
+    freezer.tick(1.5)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+    assert mock_client.async_get_current_info.await_count == polls_before + 1
+    assert hass.states.get(ENTITY).state == STATE_PAUSED
+
+
+async def test_rapid_commands_collapse_into_one_settle_refresh(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_client: AsyncMock,
+    freezer,
+) -> None:
+    """Only the newest command's post-settle refresh survives a burst."""
+    polls_before = mock_client.async_get_current_info.await_count
+
+    await hass.services.async_call(
+        MP_DOMAIN, SERVICE_MEDIA_PLAY, {ATTR_ENTITY_ID: ENTITY}, blocking=True
+    )
+    await hass.services.async_call(
+        MP_DOMAIN, SERVICE_MEDIA_PAUSE, {ATTR_ENTITY_ID: ENTITY}, blocking=True
+    )
+    assert hass.states.get(ENTITY).state == STATE_PAUSED
+
+    freezer.tick(1.5)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+    assert mock_client.async_get_current_info.await_count == polls_before + 1
+
+
+async def test_unload_cancels_a_pending_settle_refresh(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """Unloading right after a command drops the scheduled refresh cleanly."""
+    await hass.services.async_call(
+        MP_DOMAIN, SERVICE_MEDIA_STOP, {ATTR_ENTITY_ID: ENTITY}, blocking=True
+    )
+    assert await hass.config_entries.async_unload(init_integration.entry_id)
+    await hass.async_block_till_done()
 
 
 async def test_command_failure_is_translated(

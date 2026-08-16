@@ -17,6 +17,10 @@ SCAN_INTERVAL: Final = timedelta(seconds=5)
 #: Waking from standby takes about twelve seconds, during which the piano ignores commands.
 WAKEUP_SECONDS: Final = 15
 
+#: How long the firmware keeps reporting the previous state after accepting a command.
+#: Polling sooner only reads back the state the command just replaced.
+COMMAND_SETTLE_SECONDS: Final = 1.0
+
 #: Milliseconds per second, for converting the piano's positions to Home Assistant's seconds.
 MS_PER_SECOND: Final = 1000
 

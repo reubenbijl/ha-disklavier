@@ -139,8 +139,9 @@ Silence the room after bedtime without stopping playback:
 ## How data updates
 
 The integration polls the piano every **5 seconds** over HTTP. The piano's own web interface
-polls twice a second, so this is well within what it expects. Every command you send triggers
-an immediate refresh, so the UI does not wait a full interval to catch up.
+polls twice a second, so this is well within what it expects. Transport commands show their
+effect immediately, and every command also forces a refresh about a second later — once the
+firmware has caught up with itself — so the UI never waits out a full poll interval.
 
 Playback position is interpolated between polls, so the progress bar moves smoothly rather
 than stepping every five seconds.

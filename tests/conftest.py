@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import AsyncGenerator, Generator
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -16,6 +16,7 @@ from aiodisklavier import (
     Song,
     StaticInfo,
 )
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -142,9 +143,15 @@ def mock_client(
 @pytest.fixture
 async def init_integration(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_client: AsyncMock
-) -> MockConfigEntry:
-    """Set up the integration with a mocked piano."""
+) -> AsyncGenerator[MockConfigEntry]:
+    """Set up the integration with a mocked piano, and unload it afterwards.
+
+    The unload matters: commands schedule a delayed post-command refresh, and tearing
+    the entry down cancels it the same way a real Home Assistant would.
+    """
     mock_config_entry.add_to_hass(hass)
     await hass.config_entries.async_setup(mock_config_entry.entry_id)
     await hass.async_block_till_done()
-    return mock_config_entry
+    yield mock_config_entry
+    if mock_config_entry.state is ConfigEntryState.LOADED:
+        await hass.config_entries.async_unload(mock_config_entry.entry_id)
