@@ -22,11 +22,19 @@ rules:
       already well below what the device expects, and every command issues an immediate
       refresh so the UI never waits a full interval to reflect a user action.
   brands:
-    status: todo
+    status: done
     comment: |
-      Requires a pull request to home-assistant/brands, which cannot be satisfied from this
-      repository. Source artwork is in assets/; assets/brands/ holds the exported icon.png
-      and icon@2x.png ready to copy into custom_integrations/disklavier/ there.
+      The icons ship in custom_components/disklavier/brand/, which is how a custom
+      integration carries its own artwork since HA 2026.3 -- Home Assistant serves them
+      through the brands proxy API and prefers them over the CDN. That also satisfies the
+      HACS brands check, which looks for brand/icon.png before falling back to the brands
+      repository.
+
+      A pull request to home-assistant/brands is open as well, adding
+      custom_integrations/disklavier. That folder is legacy, but it is what installs older
+      than 2026.3 read, and a core submission would need the artwork there regardless.
+
+      Source artwork is in assets/; assets/brands/ holds the exports.
   common-modules:
     status: done
     comment: Coordinator in coordinator.py, base entity in entity.py.

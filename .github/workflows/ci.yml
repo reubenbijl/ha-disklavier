@@ -71,6 +71,3 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
-          # Not yet listed in home-assistant/brands; that PR is tracked in
-          # quality_scale.yaml. Remove this once it lands.
-          ignore: brands
