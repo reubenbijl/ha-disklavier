@@ -25,7 +25,8 @@ rules:
     status: todo
     comment: |
       Requires a pull request to home-assistant/brands, which cannot be satisfied from this
-      repository. Source artwork is in assets/.
+      repository. Source artwork is in assets/; assets/brands/ holds the exported icon.png
+      and icon@2x.png ready to copy into custom_integrations/disklavier/ there.
   common-modules:
     status: done
     comment: Coordinator in coordinator.py, base entity in entity.py.

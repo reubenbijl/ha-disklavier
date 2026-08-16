@@ -46,8 +46,13 @@ its own HTTP-level tests, so repeating them here buys nothing.
 
 ## Also needed, outside the code PR
 
-1. **Brands** — a logo and icon PR to [home-assistant/brands](https://github.com/home-assistant/brands).
-   `assets/Disklavier Logo.pxd` is the source artwork. Requires specific PNG sizes.
+1. **Brands** — an icon PR to [home-assistant/brands](https://github.com/home-assistant/brands),
+   adding `custom_integrations/disklavier/`. `assets/brands/` holds the files ready to copy:
+   `icon.png` at 256x256 and `icon@2x.png` at 512x512, both square, exported from
+   `assets/Disklavier Logo.pxd` via `assets/Disklavier Logo.png`. A `logo.png` is optional and
+   is a different asset — landscape, at the wordmark's own proportions, shortest side 128-256
+   (256-512 for `@2x`); compare `core_integrations/yamaha_musiccast/logo.png`, which is the
+   product wordmark alone with no manufacturer mark.
 2. **Documentation** — a page for
    [home-assistant.io](https://github.com/home-assistant/home-assistant.io) under
    `source/_integrations/disklavier.markdown`. Core will not merge an integration without it.
