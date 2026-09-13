@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from aiodisklavier import (
+    Album,
     CurrentInfo,
     DisklavierCommandError,
     Genre,
@@ -433,6 +434,60 @@ async def test_play_media_random_genre(
     )
 
 
+@pytest.mark.parametrize(
+    ("folder", "album_title"),
+    [
+        ("favourites", "HousePianistApp/Favourites"),
+        ("to-review", "HousePianistApp/to-review"),
+    ],
+)
+async def test_play_media_quick_link(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_client: AsyncMock,
+    folder: str,
+    album_title: str,
+) -> None:
+    """A Quick Links entry resolves its current album id, then plays it."""
+    mock_client.async_get_albums.return_value = [
+        Album(album_id=9, title=album_title)
+    ]
+
+    await hass.services.async_call(
+        MP_DOMAIN,
+        SERVICE_PLAY_MEDIA,
+        {
+            ATTR_ENTITY_ID: ENTITY,
+            ATTR_MEDIA_CONTENT_TYPE: "music",
+            ATTR_MEDIA_CONTENT_ID: f"quick_link/{folder}",
+        },
+        blocking=True,
+    )
+    mock_client.async_play_album.assert_awaited_once_with(
+        9, SongGroup.PC_SHARING_FOLDER
+    )
+
+
+async def test_play_media_quick_link_before_the_folder_exists(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """Playing a Quick Links folder before it is synced fails clearly, not silently."""
+    mock_client.async_get_albums.return_value = []
+
+    with pytest.raises(HomeAssistantError) as err:
+        await hass.services.async_call(
+            MP_DOMAIN,
+            SERVICE_PLAY_MEDIA,
+            {
+                ATTR_ENTITY_ID: ENTITY,
+                ATTR_MEDIA_CONTENT_TYPE: "music",
+                ATTR_MEDIA_CONTENT_ID: "quick_link/favourites",
+            },
+            blocking=True,
+        )
+    assert err.value.translation_key == "quick_link_not_found"
+
+
 # ----------------------------------------------------------------------
 # Searching
 # ----------------------------------------------------------------------
@@ -515,6 +570,7 @@ async def test_browse_root_lists_the_libraries(
     root = await entity.async_browse_media()
 
     titles = [child.title for child in root.children]
+    assert "Quick Links" in titles
     assert "Built-in Songs" in titles
     assert "Playlists" in titles
     assert "Radio" in titles

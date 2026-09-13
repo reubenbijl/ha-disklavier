@@ -76,6 +76,9 @@
     },
     "unsupported_media_id": {
       "message": "Cannot play \"{media_id}\". Choose an item from the media browser, or use a supported media content ID."
+    },
+    "quick_link_not_found": {
+      "message": "No \"{folder}\" folder found in PC Sharing Folder. Sync it to the share and reindex, then try again."
     }
   }
 }

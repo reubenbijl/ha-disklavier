@@ -38,6 +38,8 @@ from .const import (
     CONTENT_ALBUM,
     CONTENT_PLAYLIST,
     CONTENT_PLAYLIST_ITEM,
+    CONTENT_QUICK_LINK,
+    CONTENT_QUICK_LINKS,
     CONTENT_RADIO,
     CONTENT_RANDOM,
     CONTENT_SEARCH,
@@ -67,6 +69,16 @@ _PLAYLIST_LIBRARIES: list[tuple[PlaylistGroup, str]] = [
 #: Shown for the piano's unnamed album, which holds the files at a library's root.
 #: "(Root)" is what Yamaha's own ENSPIRE controller calls it.
 _UNNAMED_FOLDER = "(Root)"
+
+#: PC Sharing Folder subdirectories offered under "Quick Links", in display order.
+#: Each jumps straight to that folder's own page, bypassing PC Sharing Folder's own
+#: directory tree entirely. Matched case-insensitively against an album's last path
+#: segment -- never by id, since a reindex reassigns those. Add a folder here to give
+#: it the same one-tap shortcut.
+_QUICK_LINKS: list[tuple[str, str]] = [
+    ("to-review", "To Review"),
+    ("favourites", "Favourites"),
+]
 
 #: Built-in genres offered under "Surprise Me", in the piano's own menu order. Each
 #: node asks the piano itself to pick a random song from that genre.
@@ -149,6 +161,9 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         super().__init__(coordinator)
         self._attr_unique_id = coordinator.static_info.disklavier_id
         self._optimistic_state: MediaPlayerState | None = None
+        #: Quick Links folder -> the album it resolved to, and the songs it held then.
+        #: See ``_resolve_quick_link``.
+        self._quick_links: dict[str, tuple[Album, frozenset[Song]]] = {}
 
     # ------------------------------------------------------------------
     # State
@@ -334,6 +349,7 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
             radio/<channel_id>
             random/<genre>
             search/<title>
+            quick_link/<folder>
         """
         client = self.coordinator.client
         kind, _, rest = media_id.partition("/")
@@ -349,6 +365,9 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
                 return
             if kind == CONTENT_RADIO:
                 await self._async_call(client.async_play_radio(int(rest)))
+                return
+            if kind == CONTENT_QUICK_LINK:
+                await self._async_play_quick_link(rest)
                 return
 
             group_name, _, item_id = rest.partition("/")
@@ -419,6 +438,10 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
                 return await self._browse_radio()
             if kind == CONTENT_RANDOM:
                 return self._browse_random()
+            if kind == CONTENT_QUICK_LINKS:
+                return self._browse_quick_links()
+            if kind == CONTENT_QUICK_LINK:
+                return await self._browse_quick_link(rest)
         except DisklavierError as err:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
@@ -441,6 +464,16 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
     def _browse_root(self) -> BrowseMedia:
         """Build the top level of the browser."""
         children = [
+            BrowseMedia(
+                title="Quick Links",
+                media_class=MediaClass.DIRECTORY,
+                media_content_type=MediaType.MUSIC,
+                media_content_id=CONTENT_QUICK_LINKS,
+                can_play=False,
+                can_expand=True,
+            )
+        ]
+        children += [
             BrowseMedia(
                 title=title,
                 media_class=MediaClass.DIRECTORY,
@@ -602,6 +635,12 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         albums = await self.coordinator.client.async_get_albums(group)
         songs = await self.coordinator.client.async_get_songs_in_album(album_id, group)
         title = next((a.title for a in albums if a.album_id == album_id), "")
+        return self._album_node(group, album_id, title, songs)
+
+    def _album_node(
+        self, group: SongGroup, album_id: int, title: str, songs: list[Song]
+    ) -> BrowseMedia:
+        """Build one folder's page from an album title and songs already in hand."""
         # Path-titled albums ("ImpromptuApp/Alban Berg") show just their last segment;
         # the parents are rendered as the virtual folder levels above this page.
         title = title.rsplit("/", 1)[-1]
@@ -615,6 +654,139 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
             can_expand=True,
             children_media_class=MediaClass.TRACK,
             children=self._song_nodes(group, songs),
+        )
+
+    def _browse_quick_links(self) -> BrowseMedia:
+        """List the curated one-tap shortcuts onto specific PC Sharing Folder folders.
+
+        Each entry is itself playable and expandable, same as a folder found by
+        browsing PC Sharing Folder directly -- this is just a shorter path there.
+        """
+        return BrowseMedia(
+            title="Quick Links",
+            media_class=MediaClass.DIRECTORY,
+            media_content_type=MediaType.MUSIC,
+            media_content_id=CONTENT_QUICK_LINKS,
+            can_play=False,
+            can_expand=True,
+            children_media_class=MediaClass.DIRECTORY,
+            children=[
+                BrowseMedia(
+                    title=title,
+                    media_class=MediaClass.DIRECTORY,
+                    media_content_type=MediaType.MUSIC,
+                    media_content_id=f"{CONTENT_QUICK_LINK}/{folder}",
+                    can_play=True,
+                    can_expand=True,
+                )
+                for folder, title in _QUICK_LINKS
+            ],
+        )
+
+    async def _find_album_by_folder_name(self, folder: str) -> Album | None:
+        """Look a PC Sharing Folder subdirectory up in the piano's full album list.
+
+        The slow way in: the piano takes about two seconds to list a few hundred
+        albums, which is why ``_resolve_quick_link`` comes here only when it must.
+        """
+        albums = await self.coordinator.client.async_get_albums(
+            SongGroup.PC_SHARING_FOLDER
+        )
+        return next(
+            (
+                album
+                for album in albums
+                if album.title.rsplit("/", 1)[-1].casefold() == folder.casefold()
+            ),
+            None,
+        )
+
+    async def _resolve_quick_link(
+        self, folder: str
+    ) -> tuple[Album, list[Song]] | None:
+        """Resolve a Quick Links folder to its album and the songs in it now.
+
+        Finding the album means listing every album on the share, about two seconds,
+        while listing one album's songs takes a tenth of that and is needed for the
+        page anyway. So the album is remembered, and each visit lists the remembered
+        album's songs and compares them with last time's. The same songs under the
+        same ids can only have come from the same folder, so the album still stands;
+        anything else -- songs synced in, a folder moved, ids reassigned by a
+        reindex -- goes back through the full lookup.
+        """
+        client = self.coordinator.client
+        group = SongGroup.PC_SHARING_FOLDER
+
+        remembered = self._quick_links.get(folder)
+        if remembered is not None:
+            album, seen = remembered
+            songs = await client.async_get_songs_in_album(album.album_id, group)
+            if frozenset(songs) == seen:
+                return album, songs
+
+        found = await self._find_album_by_folder_name(folder)
+        if found is None:
+            self._quick_links.pop(folder, None)
+            return None
+        songs = await client.async_get_songs_in_album(found.album_id, group)
+        if songs:
+            self._quick_links[folder] = (found, frozenset(songs))
+        else:
+            # An empty listing is also what a stale id gets back, so it proves nothing.
+            self._quick_links.pop(folder, None)
+        return found, songs
+
+    async def _browse_quick_link(self, folder: str) -> BrowseMedia:
+        """Jump straight into one Quick Links folder.
+
+        Without this, reaching e.g. Favourites means PC Sharing Folder ->
+        HousePianistApp -> Favourites -- three taps to the one folder that matters
+        most day to day.
+        """
+        title = next((t for f, t in _QUICK_LINKS if f == folder), folder)
+        resolved = await self._resolve_quick_link(folder)
+        if resolved is None:
+            return BrowseMedia(
+                title=title,
+                media_class=MediaClass.DIRECTORY,
+                media_content_type=MediaType.MUSIC,
+                media_content_id=f"{CONTENT_QUICK_LINK}/{folder}",
+                can_play=False,
+                can_expand=True,
+                children_media_class=MediaClass.TRACK,
+                children=[],
+            )
+        album, songs = resolved
+        return self._album_node(
+            SongGroup.PC_SHARING_FOLDER, album.album_id, album.title, songs
+        )
+
+    async def _async_play_quick_link(self, folder: str) -> None:
+        """Play one Quick Links folder, resolving its current album id first.
+
+        The lookup itself can fail the same way any piano request can, so it gets
+        the same translated-error treatment ``_async_call`` gives the play command
+        that follows it.
+        """
+        try:
+            resolved = await self._resolve_quick_link(folder)
+        except DisklavierError as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="command_failed",
+                translation_placeholders={"error": str(err)},
+            ) from err
+        if resolved is None:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="quick_link_not_found",
+                translation_placeholders={"folder": folder},
+            )
+        album, _ = resolved
+        await self._async_call(
+            self.coordinator.client.async_play_album(
+                album.album_id, SongGroup.PC_SHARING_FOLDER
+            )
         )
 
     def _song_nodes(self, group: SongGroup, songs: list[Song]) -> list[BrowseMedia]:

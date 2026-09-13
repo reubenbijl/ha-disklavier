@@ -246,6 +246,146 @@ async def test_browse_reports_a_failing_library(
     assert err.value.translation_key == "browse_failed"
 
 
+async def test_browse_quick_links_lists_the_configured_folders(
+    hass: HomeAssistant, init_integration: MockConfigEntry
+) -> None:
+    """Quick Links offers one playable, expandable entry per configured folder."""
+    root = await _browse(hass)
+    assert "Quick Links" in [child.title for child in root.children]
+
+    node = await _browse(hass, "quick_links")
+    assert node.can_play is False
+    assert [child.title for child in node.children] == ["To Review", "Favourites"]
+    assert node.children[0].media_content_id == "quick_link/to-review"
+    assert node.children[1].media_content_id == "quick_link/favourites"
+    assert all(child.can_play for child in node.children)
+    assert all(child.can_expand for child in node.children)
+
+
+async def test_browse_quick_link_jumps_straight_to_the_album(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """A Quick Links entry skips PC Sharing Folder's own directory tree.
+
+    Reaching Favourites any other way is PC Sharing Folder -> HousePianistApp ->
+    Favourites; this is the one-tap alternative for the folder used every day.
+    """
+    mock_client.async_get_albums.return_value = [
+        Album(album_id=1, title="HousePianistApp/to-review"),
+        Album(album_id=2, title="HousePianistApp/Favourites"),
+    ]
+    mock_client.async_get_songs_in_album.return_value = [
+        Song(song_id=42, title="Clair de lune")
+    ]
+
+    node = await _browse(hass, "quick_link/favourites")
+    assert node.title == "Favourites"
+    assert node.can_play is True
+    assert [child.title for child in node.children] == ["Clair de lune"]
+    mock_client.async_get_songs_in_album.assert_awaited_once_with(
+        2, SongGroup.PC_SHARING_FOLDER
+    )
+    # The album list is the slow call; the page must not fetch it a second time just
+    # to recover a title the lookup already had.
+    assert mock_client.async_get_albums.await_count == 1
+
+
+async def test_browse_quick_link_before_the_folder_exists(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """Browsing a Quick Links folder before it has ever been synced shows an empty page."""
+    mock_client.async_get_albums.return_value = []
+
+    node = await _browse(hass, "quick_link/favourites")
+    assert node.title == "Favourites"
+    assert node.can_play is False
+    assert node.children == []
+
+
+async def test_browse_quick_link_again_skips_the_album_list(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """Revisiting an unchanged Quick Links folder costs one song listing, nothing more.
+
+    Listing every album takes the piano about two seconds with a few hundred of them;
+    one album's songs take a tenth of that, and the page needs them regardless.
+    """
+    mock_client.async_get_albums.return_value = [
+        Album(album_id=2, title="HousePianistApp/Favourites")
+    ]
+    mock_client.async_get_songs_in_album.return_value = [
+        Song(song_id=42, title="Clair de lune")
+    ]
+
+    await _browse(hass, "quick_link/favourites")
+    node = await _browse(hass, "quick_link/favourites")
+
+    assert [child.title for child in node.children] == ["Clair de lune"]
+    assert mock_client.async_get_albums.await_count == 1
+    assert mock_client.async_get_songs_in_album.await_count == 2
+
+
+async def test_browse_quick_link_looks_again_once_the_folder_changes(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """Songs that differ from last time send the lookup back to the album list.
+
+    A reindex can leave the remembered id naming a different folder entirely, so a
+    listing that no longer matches is never assumed to be the same folder.
+    """
+    mock_client.async_get_albums.return_value = [
+        Album(album_id=2, title="HousePianistApp/Favourites")
+    ]
+    mock_client.async_get_songs_in_album.return_value = [
+        Song(song_id=42, title="Clair de lune")
+    ]
+    await _browse(hass, "quick_link/favourites")
+
+    # Reindexed: Favourites is album 7 now, and album 2 belongs to another folder.
+    mock_client.async_get_albums.return_value = [
+        Album(album_id=2, title="HousePianistApp/to-review"),
+        Album(album_id=7, title="HousePianistApp/Favourites"),
+    ]
+    listings = {
+        2: [Song(song_id=90, title="Someone Like You")],
+        7: [
+            Song(song_id=43, title="Clair de lune"),
+            Song(song_id=44, title="Gymnopédie No. 1"),
+        ],
+    }
+    mock_client.async_get_songs_in_album.side_effect = (
+        lambda album_id, group: listings[album_id]
+    )
+
+    node = await _browse(hass, "quick_link/favourites")
+
+    assert [child.title for child in node.children] == [
+        "Clair de lune",
+        "Gymnopédie No. 1",
+    ]
+    assert node.children[0].media_content_id == "song/pc_sharing_folder/43"
+    assert mock_client.async_get_albums.await_count == 2
+
+
+async def test_browse_quick_link_does_not_trust_an_empty_listing(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """An album that lists no songs is not remembered.
+
+    A stale id also lists no songs, so an empty result could never tell the two
+    apart -- right after a reindex the piano briefly answers this way for real albums.
+    """
+    mock_client.async_get_albums.return_value = [
+        Album(album_id=2, title="HousePianistApp/Favourites")
+    ]
+    mock_client.async_get_songs_in_album.return_value = []
+
+    await _browse(hass, "quick_link/favourites")
+    await _browse(hass, "quick_link/favourites")
+
+    assert mock_client.async_get_albums.await_count == 2
+
+
 async def test_browse_surprise_me_lists_genres(
     hass: HomeAssistant, init_integration: MockConfigEntry
 ) -> None:
