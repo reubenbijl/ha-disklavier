@@ -21,6 +21,11 @@ WAKEUP_SECONDS: Final = 15
 #: Polling sooner only reads back the state the command just replaced.
 COMMAND_SETTLE_SECONDS: Final = 1.0
 
+#: How long after the piano reports a library change before Quick Links are refreshed.
+#: Album listings can still come back empty for a few seconds after a reindex, and a
+#: refresh inside that window would leave a folder unresolved until someone opened it.
+LIBRARY_SETTLE_SECONDS: Final = 5
+
 #: Milliseconds per second, for converting the piano's positions to Home Assistant's seconds.
 MS_PER_SECOND: Final = 1000
 

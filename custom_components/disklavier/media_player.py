@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -30,9 +31,10 @@ from homeassistant.components.media_player import (
     SearchMedia,
     SearchMediaQuery,
 )
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.event import async_call_later
 
 from .const import (
     CONTENT_ALBUM,
@@ -45,10 +47,13 @@ from .const import (
     CONTENT_SEARCH,
     CONTENT_SONG,
     DOMAIN,
+    LIBRARY_SETTLE_SECONDS,
     MS_PER_SECOND,
 )
 from .coordinator import DisklavierConfigEntry, DisklavierCoordinator
 from .entity import DisklavierEntity
+
+_LOGGER = logging.getLogger(__name__)
 
 PARALLEL_UPDATES = 1
 
@@ -164,6 +169,9 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         #: Quick Links folder -> the album it resolved to, and the songs it held then.
         #: See ``_resolve_quick_link``.
         self._quick_links: dict[str, tuple[Album, frozenset[Song]]] = {}
+        #: The piano's library stamp as of the last Quick Links refresh it scheduled.
+        self._library_seen: int | None = None
+        self._cancel_warm_up: CALLBACK_TYPE | None = None
 
     # ------------------------------------------------------------------
     # State
@@ -184,7 +192,46 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
     def _handle_coordinator_update(self) -> None:
         """Let each real poll supersede any optimistic state."""
         self._optimistic_state = None
+        self._watch_library()
         super()._handle_coordinator_update()
+
+    @callback
+    def _watch_library(self) -> None:
+        """Refresh Quick Links soon after the piano's library changes.
+
+        Every sync ends with a reindex, and the piano stamps its library when one
+        finishes -- ``MasterState.library_updated``, which arrives with the poll that
+        already runs. Refreshing then moves the folder lookup to just after the sync,
+        so opening a folder later finds it already resolved. The first stamp seen,
+        at startup, counts as a change.
+        """
+        master = self.coordinator.data.master
+        stamp = None if master is None else master.library_updated
+        if stamp is None or stamp == self._library_seen:
+            return
+        self._library_seen = stamp
+        if self._cancel_warm_up is not None:
+            self._cancel_warm_up()
+        self._cancel_warm_up = async_call_later(
+            self.hass, LIBRARY_SETTLE_SECONDS, self._async_warm_quick_links
+        )
+
+    async def _async_warm_quick_links(self, _now: datetime) -> None:
+        """Resolve every Quick Links folder now, so the next visit is already warm."""
+        self._cancel_warm_up = None
+        for folder, _ in _QUICK_LINKS:
+            try:
+                await self._resolve_quick_link(folder)
+            except DisklavierError as err:
+                # Nothing is lost: the next visit to the folder does the lookup itself.
+                _LOGGER.debug("Could not refresh quick link %s: %s", folder, err)
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Drop any pending Quick Links refresh."""
+        if self._cancel_warm_up is not None:
+            self._cancel_warm_up()
+            self._cancel_warm_up = None
+        await super().async_will_remove_from_hass()
 
     @property
     def state(self) -> MediaPlayerState:
@@ -583,9 +630,15 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
 
         The piano flattens nested directories into album titles with ``/`` separators
         (``ImpromptuApp/Alban Berg``), so titles are split back into levels: an album
-        whose remaining title holds no separator is a playable folder of songs, and
-        every distinct leading segment becomes a virtual directory, kept in the
-        piano's own ordering at first appearance.
+        whose remaining title holds no separator is a folder of songs, and every
+        distinct leading segment becomes a virtual directory, kept in the piano's own
+        ordering at first appearance.
+
+        No folder entry in a listing is marked playable -- only a folder's own page is,
+        which puts a Play button in its header. Home Assistant's media browser hides a
+        playable card's play button until the pointer hovers, and a touch screen spends
+        the first tap revealing it, so playable folders took two taps to open where
+        every other folder took one, with nothing on screen to tell them apart.
         """
         prefix = f"{path}/" if path else ""
         seen_dirs: set[str] = set()
@@ -624,7 +677,7 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
                         media_content_id=(
                             f"{CONTENT_ALBUM}/{group.value}/{album.album_id}"
                         ),
-                        can_play=True,
+                        can_play=False,
                         can_expand=True,
                     )
                 )
@@ -659,8 +712,9 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
     def _browse_quick_links(self) -> BrowseMedia:
         """List the curated one-tap shortcuts onto specific PC Sharing Folder folders.
 
-        Each entry is itself playable and expandable, same as a folder found by
-        browsing PC Sharing Folder directly -- this is just a shorter path there.
+        Each entry opens the folder's page, same as a folder found by browsing PC
+        Sharing Folder directly -- this is just a shorter path there. Like every
+        folder entry it is not itself playable; see ``_album_level_nodes``.
         """
         return BrowseMedia(
             title="Quick Links",
@@ -676,7 +730,7 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
                     media_class=MediaClass.DIRECTORY,
                     media_content_type=MediaType.MUSIC,
                     media_content_id=f"{CONTENT_QUICK_LINK}/{folder}",
-                    can_play=True,
+                    can_play=False,
                     can_expand=True,
                 )
                 for folder, title in _QUICK_LINKS
@@ -684,14 +738,24 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         )
 
     async def _find_album_by_folder_name(self, folder: str) -> Album | None:
-        """Look a PC Sharing Folder subdirectory up in the piano's full album list.
+        """Look a PC Sharing Folder subdirectory up by name.
 
-        The slow way in: the piano takes about two seconds to list a few hundred
-        albums, which is why ``_resolve_quick_link`` comes here only when it must.
+        Read from a fresh copy of the piano's song database, which it serves in about
+        a third of a second, rather than its album listing, which it takes nearer two
+        to build for a few hundred albums -- same ids, same titles. A database with no
+        album rows at all falls back to the listing.
         """
-        albums = await self.coordinator.client.async_get_albums(
-            SongGroup.PC_SHARING_FOLDER
-        )
+        client = self.coordinator.client
+        db = await client.async_get_song_db(refresh=True)
+        albums: list[Album]
+        if db.albums:
+            albums = [
+                Album(album_id=album.album_id, title=album.title)
+                for album in db.albums.values()
+                if album.group is SongGroup.PC_SHARING_FOLDER
+            ]
+        else:
+            albums = await client.async_get_albums(SongGroup.PC_SHARING_FOLDER)
         return next(
             (
                 album
@@ -701,18 +765,16 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
             None,
         )
 
-    async def _resolve_quick_link(
-        self, folder: str
-    ) -> tuple[Album, list[Song]] | None:
+    async def _resolve_quick_link(self, folder: str) -> tuple[Album, list[Song]] | None:
         """Resolve a Quick Links folder to its album and the songs in it now.
 
-        Finding the album means listing every album on the share, about two seconds,
-        while listing one album's songs takes a tenth of that and is needed for the
-        page anyway. So the album is remembered, and each visit lists the remembered
+        Listing one album's songs is the cheapest read there is, and the page needs
+        it anyway, so the album is remembered and each visit lists the remembered
         album's songs and compares them with last time's. The same songs under the
         same ids can only have come from the same folder, so the album still stands;
         anything else -- songs synced in, a folder moved, ids reassigned by a
-        reindex -- goes back through the full lookup.
+        reindex -- goes back through the full lookup. ``_watch_library`` runs this
+        after every reindex, so a visit normally finds the work already done.
         """
         client = self.coordinator.client
         group = SongGroup.PC_SHARING_FOLDER
@@ -823,7 +885,9 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
                     media_content_id=(
                         f"{CONTENT_PLAYLIST}/{group.value}/{playlist.playlist_id}"
                     ),
-                    can_play=True,
+                    # Opens in one tap; the playlist's page plays it. See
+                    # _album_level_nodes.
+                    can_play=False,
                     can_expand=True,
                 )
                 for playlist in playlists
@@ -942,7 +1006,9 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
                             f"{CONTENT_PLAYLIST}/{result.playlist_group.value}"
                             f"/{result.playlist.playlist_id}"
                         ),
-                        can_play=True,
+                        # Opens in one tap; the playlist's page plays it. See
+                        # _album_level_nodes.
+                        can_play=False,
                         can_expand=True,
                     )
                 )

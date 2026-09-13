@@ -15,6 +15,7 @@ from aiodisklavier import (
     QuietMode,
     RepeatMode,
     Song,
+    SongDatabase,
     SongFormat,
     SongGroup,
     StaticInfo,
@@ -151,6 +152,7 @@ def mock_client(
     ]
     client.async_get_albums.return_value = []
     client.async_get_songs_in_album.return_value = []
+    client.async_get_song_db.return_value = SongDatabase(update=1, songs={})
     client.async_lookup_song.return_value = library_song
     client.async_search.return_value = []
     client.async_get_playlists.return_value = []

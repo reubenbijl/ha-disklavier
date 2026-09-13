@@ -7,11 +7,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 from aiodisklavier import (
-    Album,
     CurrentInfo,
     DisklavierCommandError,
     Genre,
     GenreSelect,
+    LibraryAlbum,
     LibrarySong,
     PlaybackStatus,
     Playlist,
@@ -21,6 +21,7 @@ from aiodisklavier import (
     RepeatMode,
     SearchKind,
     SearchResult,
+    SongDatabase,
     SongFormat,
     SongGroup,
 )
@@ -449,9 +450,19 @@ async def test_play_media_quick_link(
     album_title: str,
 ) -> None:
     """A Quick Links entry resolves its current album id, then plays it."""
-    mock_client.async_get_albums.return_value = [
-        Album(album_id=9, title=album_title)
-    ]
+    mock_client.async_get_song_db.return_value = SongDatabase(
+        update=1,
+        songs={},
+        albums={
+            "f9": LibraryAlbum(
+                prefix="f",
+                album_id=9,
+                title=album_title,
+                path=f"FromToPC/{album_title}",
+                group=SongGroup.PC_SHARING_FOLDER,
+            )
+        },
+    )
 
     await hass.services.async_call(
         MP_DOMAIN,
@@ -496,7 +507,11 @@ async def test_play_media_quick_link_before_the_folder_exists(
 async def test_search_media_maps_every_kind(
     hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
 ) -> None:
-    """Search results become playable browse items, one shape per kind."""
+    """Search results become browse items, one shape per kind.
+
+    Songs and channels play from the result; a playlist opens in one tap like a
+    folder, and its own page plays it.
+    """
     song = LibrarySong(
         prefix="y",
         song_id=24,
@@ -539,7 +554,8 @@ async def test_search_media_maps_every_kind(
         "playlist/playlists/3",
         "radio/5",
     ]
-    assert all(item.can_play for item in media.result)
+    assert [item.can_play for item in media.result] == [True, False, True]
+    assert [item.can_expand for item in media.result] == [False, True, False]
     mock_client.async_search.assert_awaited_once_with("Clair de lune")
 
 

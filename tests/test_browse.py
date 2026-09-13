@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -10,16 +11,24 @@ from aiodisklavier import (
     Album,
     DisklavierConnectionError,
     DisklavierResponseError,
+    LibraryAlbum,
+    MasterState,
     Playlist,
     RadioChannel,
     Song,
+    SongDatabase,
     SongGroup,
 )
 from homeassistant.components.media_player import BrowseMedia
 from homeassistant.const import ATTR_ENTITY_ID, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
+
+from custom_components.disklavier.const import LIBRARY_SETTLE_SECONDS
 
 ENTITY = "media_player.disklavier_pro"
 
@@ -42,10 +51,12 @@ async def _browse(hass: HomeAssistant, content_id: str | None = None) -> BrowseM
 async def test_browse_a_library_lists_its_folders(
     hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
 ) -> None:
-    """A library with folders shows the folders, each playable and expandable.
+    """A library with folders shows the folders, each opening in a single tap.
 
     Fetched from the piano's album list: genre collections in the built-in library,
     directories in the PC sharing folder. The flat song list is not consulted at all.
+    A folder entry is not playable -- a playable card takes a touch screen two taps to
+    open -- and the folder's own page plays it instead.
     """
     mock_client.async_get_albums.return_value = [
         Album(album_id=1, title="Pop"),
@@ -55,7 +66,7 @@ async def test_browse_a_library_lists_its_folders(
     node = await _browse(hass, "library/built_in_songs")
     assert [child.title for child in node.children] == ["Pop", "(Root)"]
     assert node.children[0].media_content_id == "album/built_in_songs/1"
-    assert all(child.can_play for child in node.children)
+    assert not any(child.can_play for child in node.children)
     assert all(child.can_expand for child in node.children)
     mock_client.async_get_songs.assert_not_awaited()
 
@@ -114,7 +125,7 @@ async def test_path_titled_folders_become_nested_directories(
     assert level.can_play is False
     assert [child.title for child in level.children] == ["Alban Berg", "Chopin"]
     assert level.children[0].media_content_id == "album/pc_sharing_folder/2"
-    assert all(child.can_play for child in level.children)
+    assert not any(child.can_play for child in level.children)
 
     deep = await _browse(hass, "album_dir/pc_sharing_folder/Deep")
     assert [child.title for child in deep.children] == ["A"]
@@ -178,15 +189,19 @@ async def test_browse_an_unnamed_folder(
 async def test_browse_playlists(
     hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
 ) -> None:
-    """The playlist library lists playlists, which are both playable and expandable."""
+    """The playlist library lists playlists, each opening in a single tap like a folder."""
     mock_client.async_get_playlists.return_value = [
         Playlist(playlist_id=1, title="RR Christmas")
     ]
 
     node = await _browse(hass, "playlists/playlists")
     assert [child.title for child in node.children] == ["RR Christmas"]
-    assert node.children[0].can_play is True
+    assert node.children[0].can_play is False
     assert node.children[0].can_expand is True
+
+    # The playlist's own page is what plays it.
+    page = await _browse(hass, "playlist/playlists/1")
+    assert page.can_play is True
 
 
 async def test_browse_inside_a_playlist(
@@ -246,10 +261,28 @@ async def test_browse_reports_a_failing_library(
     assert err.value.translation_key == "browse_failed"
 
 
+def _share_db(*albums: tuple[int, str]) -> SongDatabase:
+    """Build a song database holding PC Sharing Folder albums, each as (id, title)."""
+    return SongDatabase(
+        update=1,
+        songs={},
+        albums={
+            f"f{album_id}": LibraryAlbum(
+                prefix="f",
+                album_id=album_id,
+                title=title,
+                path=f"FromToPC/{title}",
+                group=SongGroup.PC_SHARING_FOLDER,
+            )
+            for album_id, title in albums
+        },
+    )
+
+
 async def test_browse_quick_links_lists_the_configured_folders(
     hass: HomeAssistant, init_integration: MockConfigEntry
 ) -> None:
-    """Quick Links offers one playable, expandable entry per configured folder."""
+    """Quick Links offers one entry per configured folder, each opening in one tap."""
     root = await _browse(hass)
     assert "Quick Links" in [child.title for child in root.children]
 
@@ -258,7 +291,7 @@ async def test_browse_quick_links_lists_the_configured_folders(
     assert [child.title for child in node.children] == ["To Review", "Favourites"]
     assert node.children[0].media_content_id == "quick_link/to-review"
     assert node.children[1].media_content_id == "quick_link/favourites"
-    assert all(child.can_play for child in node.children)
+    assert not any(child.can_play for child in node.children)
     assert all(child.can_expand for child in node.children)
 
 
@@ -268,33 +301,83 @@ async def test_browse_quick_link_jumps_straight_to_the_album(
     """A Quick Links entry skips PC Sharing Folder's own directory tree.
 
     Reaching Favourites any other way is PC Sharing Folder -> HousePianistApp ->
-    Favourites; this is the one-tap alternative for the folder used every day.
+    Favourites; this is the one-tap alternative for the folder used every day. The
+    folder is found in the song database, never in the album listing the piano takes
+    several times longer to build.
     """
-    mock_client.async_get_albums.return_value = [
-        Album(album_id=1, title="HousePianistApp/to-review"),
-        Album(album_id=2, title="HousePianistApp/Favourites"),
-    ]
+    mock_client.async_get_song_db.return_value = _share_db(
+        (1, "HousePianistApp/to-review"), (2, "HousePianistApp/Favourites")
+    )
     mock_client.async_get_songs_in_album.return_value = [
         Song(song_id=42, title="Clair de lune")
     ]
 
     node = await _browse(hass, "quick_link/favourites")
     assert node.title == "Favourites"
+    # The page itself is playable, which gives it a Play button for the whole folder.
     assert node.can_play is True
     assert [child.title for child in node.children] == ["Clair de lune"]
     mock_client.async_get_songs_in_album.assert_awaited_once_with(
         2, SongGroup.PC_SHARING_FOLDER
     )
-    # The album list is the slow call; the page must not fetch it a second time just
-    # to recover a title the lookup already had.
-    assert mock_client.async_get_albums.await_count == 1
+    mock_client.async_get_song_db.assert_awaited_once_with(refresh=True)
+    mock_client.async_get_albums.assert_not_awaited()
+
+
+async def test_browse_quick_link_ignores_albums_in_other_libraries(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """Only a PC Sharing Folder album answers to a Quick Links folder name.
+
+    The song database describes every library at once, and a built-in collection
+    could share a folder's name.
+    """
+    mock_client.async_get_song_db.return_value = SongDatabase(
+        update=1,
+        songs={},
+        albums={
+            "d9": LibraryAlbum(
+                prefix="d",
+                album_id=9,
+                title="Favourites",
+                path="preset/09_Favourites",
+                group=SongGroup.BUILT_IN_SONGS,
+            ),
+            **_share_db((2, "HousePianistApp/Favourites")).albums,
+        },
+    )
+
+    await _browse(hass, "quick_link/favourites")
+
+    mock_client.async_get_songs_in_album.assert_awaited_once_with(
+        2, SongGroup.PC_SHARING_FOLDER
+    )
+
+
+async def test_browse_quick_link_falls_back_to_the_album_listing(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """A song database with no album rows at all still finds the folder, the slow way."""
+    mock_client.async_get_albums.return_value = [
+        Album(album_id=2, title="HousePianistApp/Favourites")
+    ]
+    mock_client.async_get_songs_in_album.return_value = [
+        Song(song_id=42, title="Clair de lune")
+    ]
+
+    node = await _browse(hass, "quick_link/favourites")
+
+    assert [child.title for child in node.children] == ["Clair de lune"]
+    mock_client.async_get_albums.assert_awaited_once_with(SongGroup.PC_SHARING_FOLDER)
 
 
 async def test_browse_quick_link_before_the_folder_exists(
     hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
 ) -> None:
     """Browsing a Quick Links folder before it has ever been synced shows an empty page."""
-    mock_client.async_get_albums.return_value = []
+    mock_client.async_get_song_db.return_value = _share_db(
+        (5, "HousePianistApp/Chopin")
+    )
 
     node = await _browse(hass, "quick_link/favourites")
     assert node.title == "Favourites"
@@ -302,17 +385,17 @@ async def test_browse_quick_link_before_the_folder_exists(
     assert node.children == []
 
 
-async def test_browse_quick_link_again_skips_the_album_list(
+async def test_browse_quick_link_again_skips_the_lookup(
     hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
 ) -> None:
     """Revisiting an unchanged Quick Links folder costs one song listing, nothing more.
 
-    Listing every album takes the piano about two seconds with a few hundred of them;
-    one album's songs take a tenth of that, and the page needs them regardless.
+    Listing one album's songs is the cheapest read the piano offers, and the page
+    needs it regardless; the lookup behind it is not repeated.
     """
-    mock_client.async_get_albums.return_value = [
-        Album(album_id=2, title="HousePianistApp/Favourites")
-    ]
+    mock_client.async_get_song_db.return_value = _share_db(
+        (2, "HousePianistApp/Favourites")
+    )
     mock_client.async_get_songs_in_album.return_value = [
         Song(song_id=42, title="Clair de lune")
     ]
@@ -321,31 +404,30 @@ async def test_browse_quick_link_again_skips_the_album_list(
     node = await _browse(hass, "quick_link/favourites")
 
     assert [child.title for child in node.children] == ["Clair de lune"]
-    assert mock_client.async_get_albums.await_count == 1
+    assert mock_client.async_get_song_db.await_count == 1
     assert mock_client.async_get_songs_in_album.await_count == 2
 
 
 async def test_browse_quick_link_looks_again_once_the_folder_changes(
     hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
 ) -> None:
-    """Songs that differ from last time send the lookup back to the album list.
+    """Songs that differ from last time send the lookup back to the song database.
 
     A reindex can leave the remembered id naming a different folder entirely, so a
     listing that no longer matches is never assumed to be the same folder.
     """
-    mock_client.async_get_albums.return_value = [
-        Album(album_id=2, title="HousePianistApp/Favourites")
-    ]
+    mock_client.async_get_song_db.return_value = _share_db(
+        (2, "HousePianistApp/Favourites")
+    )
     mock_client.async_get_songs_in_album.return_value = [
         Song(song_id=42, title="Clair de lune")
     ]
     await _browse(hass, "quick_link/favourites")
 
     # Reindexed: Favourites is album 7 now, and album 2 belongs to another folder.
-    mock_client.async_get_albums.return_value = [
-        Album(album_id=2, title="HousePianistApp/to-review"),
-        Album(album_id=7, title="HousePianistApp/Favourites"),
-    ]
+    mock_client.async_get_song_db.return_value = _share_db(
+        (2, "HousePianistApp/to-review"), (7, "HousePianistApp/Favourites")
+    )
     listings = {
         2: [Song(song_id=90, title="Someone Like You")],
         7: [
@@ -353,9 +435,9 @@ async def test_browse_quick_link_looks_again_once_the_folder_changes(
             Song(song_id=44, title="Gymnopédie No. 1"),
         ],
     }
-    mock_client.async_get_songs_in_album.side_effect = (
-        lambda album_id, group: listings[album_id]
-    )
+    mock_client.async_get_songs_in_album.side_effect = lambda album_id, group: listings[
+        album_id
+    ]
 
     node = await _browse(hass, "quick_link/favourites")
 
@@ -364,7 +446,7 @@ async def test_browse_quick_link_looks_again_once_the_folder_changes(
         "Gymnopédie No. 1",
     ]
     assert node.children[0].media_content_id == "song/pc_sharing_folder/43"
-    assert mock_client.async_get_albums.await_count == 2
+    assert mock_client.async_get_song_db.await_count == 2
 
 
 async def test_browse_quick_link_does_not_trust_an_empty_listing(
@@ -375,15 +457,153 @@ async def test_browse_quick_link_does_not_trust_an_empty_listing(
     A stale id also lists no songs, so an empty result could never tell the two
     apart -- right after a reindex the piano briefly answers this way for real albums.
     """
-    mock_client.async_get_albums.return_value = [
-        Album(album_id=2, title="HousePianistApp/Favourites")
-    ]
+    mock_client.async_get_song_db.return_value = _share_db(
+        (2, "HousePianistApp/Favourites")
+    )
     mock_client.async_get_songs_in_album.return_value = []
 
     await _browse(hass, "quick_link/favourites")
     await _browse(hass, "quick_link/favourites")
 
-    assert mock_client.async_get_albums.await_count == 2
+    assert mock_client.async_get_song_db.await_count == 2
+
+
+async def _report_library_stamp(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    mock_client: AsyncMock,
+    master_state: MasterState,
+    stamp: int,
+    freezer: Any,
+) -> None:
+    """Have a poll report a library stamp, then let any refresh it schedules run."""
+    mock_client.async_get_master_state.return_value = replace(
+        master_state, library_updated=stamp
+    )
+    await entry.runtime_data.async_refresh()
+    freezer.tick(LIBRARY_SETTLE_SECONDS + 1)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+
+async def test_a_library_change_resolves_quick_links_before_anyone_looks(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_client: AsyncMock,
+    master_state: MasterState,
+    freezer: Any,
+) -> None:
+    """A new library stamp resolves every Quick Links folder in the background.
+
+    Every sync ends with a reindex, and the piano stamps its library when one
+    finishes -- so a folder opened afterwards finds the lookup already done.
+    """
+    mock_client.async_get_song_db.return_value = _share_db(
+        (1, "HousePianistApp/to-review"), (2, "HousePianistApp/Favourites")
+    )
+    listings = {
+        1: [Song(song_id=90, title="Someone Like You")],
+        2: [Song(song_id=42, title="Clair de lune")],
+    }
+    mock_client.async_get_songs_in_album.side_effect = lambda album_id, group: listings[
+        album_id
+    ]
+
+    await _report_library_stamp(
+        hass, init_integration, mock_client, master_state, 2000, freezer
+    )
+    assert mock_client.async_get_song_db.await_count == 2
+    mock_client.async_get_song_db.reset_mock()
+    mock_client.async_get_songs_in_album.reset_mock()
+
+    node = await _browse(hass, "quick_link/to-review")
+
+    assert [child.title for child in node.children] == ["Someone Like You"]
+    mock_client.async_get_song_db.assert_not_awaited()
+    assert mock_client.async_get_songs_in_album.await_count == 1
+
+
+async def test_the_background_refresh_waits_for_the_reindex_to_settle(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_client: AsyncMock,
+    master_state: MasterState,
+    freezer: Any,
+) -> None:
+    """Nothing is read the moment the stamp moves, while listings can still be empty."""
+    mock_client.async_get_master_state.return_value = replace(
+        master_state, library_updated=2000
+    )
+    await init_integration.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    mock_client.async_get_song_db.assert_not_awaited()
+
+    freezer.tick(LIBRARY_SETTLE_SECONDS + 1)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    mock_client.async_get_song_db.assert_awaited()
+
+
+async def test_an_unchanged_library_stamp_is_not_refreshed_again(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_client: AsyncMock,
+    master_state: MasterState,
+    freezer: Any,
+) -> None:
+    """Polls that report the same stamp leave Quick Links alone."""
+    await _report_library_stamp(
+        hass, init_integration, mock_client, master_state, 2000, freezer
+    )
+    reads = mock_client.async_get_song_db.await_count
+    assert reads > 0
+
+    await _report_library_stamp(
+        hass, init_integration, mock_client, master_state, 2000, freezer
+    )
+    assert mock_client.async_get_song_db.await_count == reads
+
+
+async def test_a_failed_background_refresh_leaves_the_folder_to_its_next_visit(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_client: AsyncMock,
+    master_state: MasterState,
+    freezer: Any,
+) -> None:
+    """A refresh the piano cannot answer is dropped quietly, folder by folder."""
+    mock_client.async_get_song_db.side_effect = DisklavierConnectionError("gone")
+
+    await _report_library_stamp(
+        hass, init_integration, mock_client, master_state, 2000, freezer
+    )
+    # The first folder's failure did not stop the second from being tried.
+    assert mock_client.async_get_song_db.await_count == 2
+
+    mock_client.async_get_song_db.side_effect = None
+    mock_client.async_get_song_db.return_value = _share_db(
+        (2, "HousePianistApp/Favourites")
+    )
+    mock_client.async_get_songs_in_album.return_value = [
+        Song(song_id=42, title="Clair de lune")
+    ]
+    node = await _browse(hass, "quick_link/favourites")
+    assert [child.title for child in node.children] == ["Clair de lune"]
+
+
+async def test_unload_cancels_a_pending_library_refresh(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_client: AsyncMock,
+    master_state: MasterState,
+) -> None:
+    """Unloading while a refresh waits for the reindex to settle drops it cleanly."""
+    mock_client.async_get_master_state.return_value = replace(
+        master_state, library_updated=2000
+    )
+    await init_integration.runtime_data.async_refresh()
+    assert await hass.config_entries.async_unload(init_integration.entry_id)
+    await hass.async_block_till_done()
 
 
 async def test_browse_surprise_me_lists_genres(
