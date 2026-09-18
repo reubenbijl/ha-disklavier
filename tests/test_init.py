@@ -13,7 +13,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.disklavier.const import DOMAIN
 
-from .conftest import DISKLAVIER_ID
+from .conftest import DISKLAVIER_ID, setup_integration
 
 
 async def test_setup_and_unload(
@@ -43,10 +43,7 @@ async def test_setup_retries_when_the_piano_is_not_answering(
     misconfiguration.
     """
     mock_client.async_get_static_info.side_effect = side_effect
-    mock_config_entry.add_to_hass(hass)
-
-    await hass.config_entries.async_setup(mock_config_entry.entry_id)
-    await hass.async_block_till_done()
+    await setup_integration(hass, mock_config_entry)
 
     assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
 
@@ -56,9 +53,13 @@ async def test_device_registry_entry(
 ) -> None:
     """The piano appears as one device, identified by its own id."""
     registry = dr.async_get(hass)
-    device = registry.async_get_device(identifiers={(DOMAIN, DISKLAVIER_ID)})
+    # Listed through the entry rather than looked up by identifier: identifiers are no
+    # longer unique across config entries, and HA 2026.9 fails the identifier lookup.
+    devices = dr.async_entries_for_config_entry(registry, init_integration.entry_id)
 
-    assert device is not None
+    assert len(devices) == 1
+    device = devices[0]
+    assert (DOMAIN, DISKLAVIER_ID) in device.identifiers
     assert device.manufacturer == "Yamaha"
     assert device.model == "Disklavier ENSPIRE PRO"
     assert device.sw_version == "5.24.00"
@@ -77,10 +78,7 @@ async def test_extended_state_is_best_effort(
     those two report unknown.
     """
     mock_client.async_get_master_state.side_effect = DisklavierResponseError("gone")
-    mock_config_entry.add_to_hass(hass)
-
-    await hass.config_entries.async_setup(mock_config_entry.entry_id)
-    await hass.async_block_till_done()
+    await setup_integration(hass, mock_config_entry)
 
     assert mock_config_entry.state is ConfigEntryState.LOADED
     state = hass.states.get("media_player.disklavier_pro")

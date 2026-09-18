@@ -22,7 +22,7 @@ WAKEUP_SECONDS: Final = 15
 COMMAND_SETTLE_SECONDS: Final = 1.0
 
 #: How long after the piano reports a library change before Quick Links are refreshed.
-#: Album listings can still come back empty for a few seconds after a reindex, and a
+#: Album listings can still fail with "no album" for a few seconds after a reindex, and a
 #: refresh inside that window would leave a folder unresolved until someone opened it.
 LIBRARY_SETTLE_SECONDS: Final = 5
 
@@ -39,3 +39,6 @@ CONTENT_SEARCH: Final = "search"
 CONTENT_RANDOM: Final = "random"
 CONTENT_QUICK_LINKS: Final = "quick_links"
 CONTENT_QUICK_LINK: Final = "quick_link"
+CONTENT_LIBRARY: Final = "library"
+CONTENT_ALBUM_DIR: Final = "album_dir"
+CONTENT_PLAYLISTS: Final = "playlists"

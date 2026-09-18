@@ -87,9 +87,10 @@ playlist_item/<group>/<id>
 radio/<channel_id>
 random/<genre>                 e.g. random/jazz — the piano picks
 search/<title>                 e.g. search/Clair de lune
+quick_link/<folder>            e.g. quick_link/favourites — a Quick Links folder, found by name
 ```
 
-The media browser also has a **search box** (and voice assistants can use the same
+Every page of the media browser has a **search box** (and voice assistants can use the same
 search): results come ranked from the piano's own song database, cover every library,
 playlists and radio, and play by exact id. `search/<title>` remains for scripts — it is a
 single fuzzy pick made by the piano itself, sight unseen.

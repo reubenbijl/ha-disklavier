@@ -11,7 +11,6 @@ from aiodisklavier import (
     DisklavierCommandError,
     Genre,
     GenreSelect,
-    LibraryAlbum,
     LibrarySong,
     PlaybackStatus,
     Playlist,
@@ -21,7 +20,6 @@ from aiodisklavier import (
     RepeatMode,
     SearchKind,
     SearchResult,
-    SongDatabase,
     SongFormat,
     SongGroup,
 )
@@ -33,6 +31,7 @@ from homeassistant.components.media_player import (
     ATTR_MEDIA_SHUFFLE,
     ATTR_MEDIA_VOLUME_LEVEL,
     SERVICE_PLAY_MEDIA,
+    MediaClass,
     SearchMediaQuery,
 )
 from homeassistant.components.media_player import (
@@ -63,7 +62,23 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
+from .conftest import setup_integration, share_db
+
 ENTITY = "media_player.disklavier_pro"
+
+
+async def _play_media(hass: HomeAssistant, content_id: str) -> None:
+    """Call media_player.play_media on the piano, the way an automation would."""
+    await hass.services.async_call(
+        MP_DOMAIN,
+        SERVICE_PLAY_MEDIA,
+        {
+            ATTR_ENTITY_ID: ENTITY,
+            ATTR_MEDIA_CONTENT_TYPE: "music",
+            ATTR_MEDIA_CONTENT_ID: content_id,
+        },
+        blocking=True,
+    )
 
 
 # ----------------------------------------------------------------------
@@ -84,6 +99,47 @@ async def test_state_and_attributes(
     assert state.attributes["media_position"] == 516
     assert state.attributes[ATTR_MEDIA_VOLUME_LEVEL] == 1.0
     assert state.attributes["media_position_updated_at"] is not None
+
+
+async def test_an_idle_piano_does_not_write_a_new_state_every_poll(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_client: AsyncMock,
+    current_info: CurrentInfo,
+    freezer,
+) -> None:
+    """Polls that find nothing changed leave the state alone.
+
+    Each poll reads the clock afresh; passed straight through as the position's
+    timestamp, it changed an attribute every five seconds and wrote a new state each
+    time -- 720 recorder rows an hour for a paused piano.
+    """
+    coordinator = init_integration.runtime_data
+    before = hass.states.get(ENTITY)
+
+    freezer.tick(5)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    unchanged = hass.states.get(ENTITY)
+    assert unchanged.last_updated == before.last_updated
+    assert (
+        unchanged.attributes["media_position_updated_at"]
+        == before.attributes["media_position_updated_at"]
+    )
+
+    # Once the position moves, the timestamp moves with it.
+    mock_client.async_get_current_info.return_value = replace(
+        current_info, position_ms=520000
+    )
+    freezer.tick(5)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    moved = hass.states.get(ENTITY)
+    assert moved.attributes["media_position"] == 520
+    assert (
+        moved.attributes["media_position_updated_at"]
+        > before.attributes["media_position_updated_at"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -109,9 +165,7 @@ async def test_state_mapping(
 ) -> None:
     """Each piano state maps onto the right Home Assistant state."""
     mock_client.async_get_current_info.return_value = replace(current_info, **changes)
-    mock_config_entry.add_to_hass(hass)
-    await hass.config_entries.async_setup(mock_config_entry.entry_id)
-    await hass.async_block_till_done()
+    await setup_integration(hass, mock_config_entry)
 
     assert hass.states.get(ENTITY).state == expected
 
@@ -140,9 +194,7 @@ async def test_repeat_and_shuffle_are_unfolded(
     mock_client.async_get_master_state.return_value = replace(
         master_state, repeat=repeat
     )
-    mock_config_entry.add_to_hass(hass)
-    await hass.config_entries.async_setup(mock_config_entry.entry_id)
-    await hass.async_block_till_done()
+    await setup_integration(hass, mock_config_entry)
 
     state = hass.states.get(ENTITY)
     assert state.attributes[ATTR_MEDIA_REPEAT] == ha_repeat
@@ -294,6 +346,34 @@ async def test_rapid_commands_collapse_into_one_settle_refresh(
     assert mock_client.async_get_current_info.await_count == polls_before + 1
 
 
+async def test_a_poll_inside_the_settle_window_keeps_the_optimistic_state(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_client: AsyncMock,
+    freezer,
+) -> None:
+    """A scheduled poll landing just after a command does not flip the state back.
+
+    That poll reads the state the command just replaced, so taking it would show
+    paused -> playing -> paused -> playing and fire "to: playing" automations twice;
+    the settle refresh is what decides.
+    """
+    await hass.services.async_call(
+        MP_DOMAIN, SERVICE_MEDIA_PLAY, {ATTR_ENTITY_ID: ENTITY}, blocking=True
+    )
+    assert hass.states.get(ENTITY).state == STATE_PLAYING
+
+    # The regular poll fires a moment later and still reads the paused piano.
+    await init_integration.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get(ENTITY).state == STATE_PLAYING
+
+    freezer.tick(1.5)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert hass.states.get(ENTITY).state == STATE_PAUSED
+
+
 async def test_unload_cancels_a_pending_settle_refresh(
     hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
 ) -> None:
@@ -345,16 +425,7 @@ async def test_play_media_by_id(
     args: tuple,
 ) -> None:
     """Each addressable media type routes to the right client call."""
-    await hass.services.async_call(
-        MP_DOMAIN,
-        SERVICE_PLAY_MEDIA,
-        {
-            ATTR_ENTITY_ID: ENTITY,
-            ATTR_MEDIA_CONTENT_TYPE: "music",
-            ATTR_MEDIA_CONTENT_ID: content_id,
-        },
-        blocking=True,
-    )
+    await _play_media(hass, content_id)
     getattr(mock_client, method).assert_awaited_once_with(*args)
 
 
@@ -362,16 +433,7 @@ async def test_play_media_by_search(
     hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
 ) -> None:
     """Search runs on the piano, which makes it the practical route for automations."""
-    await hass.services.async_call(
-        MP_DOMAIN,
-        SERVICE_PLAY_MEDIA,
-        {
-            ATTR_ENTITY_ID: ENTITY,
-            ATTR_MEDIA_CONTENT_TYPE: "music",
-            ATTR_MEDIA_CONTENT_ID: "search/Clair de lune",
-        },
-        blocking=True,
-    )
+    await _play_media(hass, "search/Clair de lune")
     mock_client.async_play_search.assert_awaited_once_with("Clair de lune")
 
 
@@ -379,16 +441,7 @@ async def test_play_media_radio(
     hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
 ) -> None:
     """Radio channels are addressed by id."""
-    await hass.services.async_call(
-        MP_DOMAIN,
-        SERVICE_PLAY_MEDIA,
-        {
-            ATTR_ENTITY_ID: ENTITY,
-            ATTR_MEDIA_CONTENT_TYPE: "music",
-            ATTR_MEDIA_CONTENT_ID: "radio/5",
-        },
-        blocking=True,
-    )
+    await _play_media(hass, "radio/5")
     mock_client.async_play_radio.assert_awaited_once_with(5)
 
 
@@ -403,16 +456,7 @@ async def test_play_media_rejects_bad_ids(
 ) -> None:
     """An unusable media id fails loudly rather than silently doing nothing."""
     with pytest.raises(HomeAssistantError) as err:
-        await hass.services.async_call(
-            MP_DOMAIN,
-            SERVICE_PLAY_MEDIA,
-            {
-                ATTR_ENTITY_ID: ENTITY,
-                ATTR_MEDIA_CONTENT_TYPE: "music",
-                ATTR_MEDIA_CONTENT_ID: content_id,
-            },
-            blocking=True,
-        )
+        await _play_media(hass, content_id)
     assert err.value.translation_key == "unsupported_media_id"
 
 
@@ -420,16 +464,7 @@ async def test_play_media_random_genre(
     hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
 ) -> None:
     """A Surprise Me pick asks the piano itself for a random song in the genre."""
-    await hass.services.async_call(
-        MP_DOMAIN,
-        SERVICE_PLAY_MEDIA,
-        {
-            ATTR_ENTITY_ID: ENTITY,
-            ATTR_MEDIA_CONTENT_TYPE: "music",
-            ATTR_MEDIA_CONTENT_ID: "random/jazz",
-        },
-        blocking=True,
-    )
+    await _play_media(hass, "random/jazz")
     mock_client.async_play_genre.assert_awaited_once_with(
         Genre.JAZZ, select=GenreSelect.RANDOM
     )
@@ -450,30 +485,9 @@ async def test_play_media_quick_link(
     album_title: str,
 ) -> None:
     """A Quick Links entry resolves its current album id, then plays it."""
-    mock_client.async_get_song_db.return_value = SongDatabase(
-        update=1,
-        songs={},
-        albums={
-            "f9": LibraryAlbum(
-                prefix="f",
-                album_id=9,
-                title=album_title,
-                path=f"FromToPC/{album_title}",
-                group=SongGroup.PC_SHARING_FOLDER,
-            )
-        },
-    )
+    mock_client.async_get_song_db.return_value = share_db((9, album_title))
 
-    await hass.services.async_call(
-        MP_DOMAIN,
-        SERVICE_PLAY_MEDIA,
-        {
-            ATTR_ENTITY_ID: ENTITY,
-            ATTR_MEDIA_CONTENT_TYPE: "music",
-            ATTR_MEDIA_CONTENT_ID: f"quick_link/{folder}",
-        },
-        blocking=True,
-    )
+    await _play_media(hass, f"quick_link/{folder}")
     mock_client.async_play_album.assert_awaited_once_with(
         9, SongGroup.PC_SHARING_FOLDER
     )
@@ -483,20 +497,24 @@ async def test_play_media_quick_link_before_the_folder_exists(
     hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
 ) -> None:
     """Playing a Quick Links folder before it is synced fails clearly, not silently."""
-    mock_client.async_get_albums.return_value = []
+    mock_client.async_get_song_db.return_value = share_db((5, "HousePianistApp/Chopin"))
 
     with pytest.raises(HomeAssistantError) as err:
-        await hass.services.async_call(
-            MP_DOMAIN,
-            SERVICE_PLAY_MEDIA,
-            {
-                ATTR_ENTITY_ID: ENTITY,
-                ATTR_MEDIA_CONTENT_TYPE: "music",
-                ATTR_MEDIA_CONTENT_ID: "quick_link/favourites",
-            },
-            blocking=True,
-        )
+        await _play_media(hass, "quick_link/favourites")
     assert err.value.translation_key == "quick_link_not_found"
+    mock_client.async_get_albums.assert_not_awaited()
+
+
+async def test_play_media_quick_link_when_the_piano_cannot_look_it_up(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """A lookup the piano cannot answer fails as a translated command error."""
+    mock_client.async_get_song_db.side_effect = DisklavierCommandError("unreachable")
+
+    with pytest.raises(HomeAssistantError) as err:
+        await _play_media(hass, "quick_link/favourites")
+    assert err.value.translation_key == "command_failed"
+    mock_client.async_play_album.assert_not_awaited()
 
 
 # ----------------------------------------------------------------------
@@ -557,6 +575,54 @@ async def test_search_media_maps_every_kind(
     assert [item.can_play for item in media.result] == [True, False, True]
     assert [item.can_expand for item in media.result] == [False, True, False]
     mock_client.async_search.assert_awaited_once_with("Clair de lune")
+
+
+async def test_search_media_honours_a_media_class_filter(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """A search asking for tracks gets only tracks, whatever ranks higher.
+
+    Assist asks for tracks when told to play "the song Christmas", then plays the first
+    result -- which would otherwise be a playlist titled exactly "Christmas".
+    """
+    mock_client.async_search.return_value = [
+        SearchResult(
+            kind=SearchKind.PLAYLIST,
+            title="Christmas",
+            score=1.0,
+            playlist=Playlist(playlist_id=1, title="Christmas"),
+            playlist_group=PlaylistGroup.PLAYLISTS,
+        ),
+        SearchResult(
+            kind=SearchKind.SONG,
+            title="Christmas Medley",
+            score=0.9,
+            song=LibrarySong(
+                prefix="f",
+                song_id=7,
+                title="Christmas Medley",
+                format=SongFormat.SMF,
+                group=SongGroup.PC_SHARING_FOLDER,
+                album_id=22,
+                length_ms=180000,
+                genre=None,
+                composer=None,
+                performer=None,
+            ),
+        ),
+    ]
+
+    component = hass.data["entity_components"]["media_player"]
+    entity = component.get_entity(ENTITY)
+    media = await entity.async_search_media(
+        SearchMediaQuery(
+            search_query="Christmas", media_filter_classes=[MediaClass.TRACK]
+        )
+    )
+
+    assert [item.media_content_id for item in media.result] == [
+        "song/pc_sharing_folder/7"
+    ]
 
 
 async def test_search_media_failure_is_translated(

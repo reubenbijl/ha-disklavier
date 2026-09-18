@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from aiodisklavier import (
     CurrentInfo,
+    LibraryAlbum,
     LibrarySong,
     MasterState,
     PlaybackStatus,
@@ -31,6 +32,31 @@ HOST = "192.168.1.50"
 DISKLAVIER_ID = "DKV000000000000"
 
 pytest_plugins = "pytest_homeassistant_custom_component"
+
+
+def share_db(*albums: tuple[int, str]) -> SongDatabase:
+    """Build a song database holding PC Sharing Folder albums, each as (id, title)."""
+    return SongDatabase(
+        update=1,
+        songs={},
+        albums={
+            f"f{album_id}": LibraryAlbum(
+                prefix="f",
+                album_id=album_id,
+                title=title,
+                path=f"FromToPC/{title}",
+                group=SongGroup.PC_SHARING_FOLDER,
+            )
+            for album_id, title in albums
+        },
+    )
+
+
+async def setup_integration(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+    """Add a config entry and set it up, the way Home Assistant loads one."""
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
 
 
 @pytest.fixture(autouse=True)
@@ -178,9 +204,7 @@ async def init_integration(
     The unload matters: commands schedule a delayed post-command refresh, and tearing
     the entry down cancels it the same way a real Home Assistant would.
     """
-    mock_config_entry.add_to_hass(hass)
-    await hass.config_entries.async_setup(mock_config_entry.entry_id)
-    await hass.async_block_till_done()
+    await setup_integration(hass, mock_config_entry)
     yield mock_config_entry
     if mock_config_entry.state is ConfigEntryState.LOADED:
         await hass.config_entries.async_unload(mock_config_entry.entry_id)

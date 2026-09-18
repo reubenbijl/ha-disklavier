@@ -19,6 +19,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from .conftest import setup_integration
+
 ENTITY = "select.disklavier_pro_quiet_mode"
 
 
@@ -42,9 +44,7 @@ async def test_reports_quiet(
     mock_client.async_get_current_info.return_value = replace(
         current_info, quiet_status=QuietMode.QUIET
     )
-    mock_config_entry.add_to_hass(hass)
-    await hass.config_entries.async_setup(mock_config_entry.entry_id)
-    await hass.async_block_till_done()
+    await setup_integration(hass, mock_config_entry)
 
     assert hass.states.get(ENTITY).state == "quiet"
 

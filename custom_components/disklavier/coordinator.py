@@ -43,8 +43,9 @@ class DisklavierData:
     #: (the loaded song's identity only exists there).
     song: LibrarySong | None
     #: When this poll completed. The media player reports it as
-    #: ``media_position_updated_at`` so the UI can extrapolate playback position between
-    #: polls instead of stepping it every five seconds.
+    #: ``media_position_updated_at``, whenever the position or play state changed, so the
+    #: UI can extrapolate playback position between polls instead of stepping it every
+    #: five seconds.
     fetched_at: datetime
 
 
@@ -71,6 +72,9 @@ class DisklavierCoordinator(DataUpdateCoordinator[DisklavierData]):
         self.client = client
         self.static_info = static_info
         self._master_warned = False
+        #: The library stamp the client's song database is known to be current for.
+        #: See ``_async_follow_library``.
+        self._library_seen: int | None = None
 
     async def _async_update_data(self) -> DisklavierData:
         """Fetch the piano's current state."""
@@ -99,6 +103,9 @@ class DisklavierCoordinator(DataUpdateCoordinator[DisklavierData]):
                 )
                 self._master_warned = True
 
+        if master is not None and master.library_updated is not None:
+            await self._async_follow_library(master.library_updated)
+
         song: LibrarySong | None = None
         if (
             master is not None
@@ -118,3 +125,25 @@ class DisklavierCoordinator(DataUpdateCoordinator[DisklavierData]):
         return DisklavierData(
             current=current, master=master, song=song, fetched_at=fetched_at
         )
+
+    async def _async_follow_library(self, stamp: int) -> None:
+        """Re-read the song database when the piano reports its library changed.
+
+        The client keeps the database cached and only re-reads it for a song it has
+        never seen. A reindex that changes a song it already holds -- a backing track
+        synced beside an indexed MIDI file turns it from MIDI to PianoSoft PlusAudio --
+        or adds songs nobody has looked up yet would otherwise leave the song type
+        sensor and search on the old library. The stamp is recorded only once the read
+        succeeds, so a failed read is tried again on the next poll. The first stamp seen
+        needs no read: the client fetches the database afresh on first use.
+        """
+        if self._library_seen is None:
+            self._library_seen = stamp
+            return
+        if stamp == self._library_seen:
+            return
+        try:
+            await self.client.async_get_song_db(refresh=True)
+        except DisklavierError:
+            return
+        self._library_seen = stamp

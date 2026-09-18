@@ -10,10 +10,13 @@ from aiodisklavier import (
     VOLUME_MAX,
     Album,
     DisklavierError,
+    DisklavierResponseError,
     Genre,
     GenreSelect,
+    Playlist,
     PlaylistGroup,
     PowerStatus,
+    RadioChannel,
     SearchKind,
     Song,
     SongGroup,
@@ -38,8 +41,11 @@ from homeassistant.helpers.event import async_call_later
 
 from .const import (
     CONTENT_ALBUM,
+    CONTENT_ALBUM_DIR,
+    CONTENT_LIBRARY,
     CONTENT_PLAYLIST,
     CONTENT_PLAYLIST_ITEM,
+    CONTENT_PLAYLISTS,
     CONTENT_QUICK_LINK,
     CONTENT_QUICK_LINKS,
     CONTENT_RADIO,
@@ -70,6 +76,11 @@ _PLAYLIST_LIBRARIES: list[tuple[PlaylistGroup, str]] = [
     (PlaylistGroup.PLAYLISTS, "Playlists"),
     (PlaylistGroup.DEMO_PLAYLIST, "Demo Playlist"),
 ]
+
+#: Titles shared by a root entry and the page it opens.
+_QUICK_LINKS_TITLE = "Quick Links"
+_RADIO_TITLE = "Radio"
+_SURPRISE_ME_TITLE = "Surprise Me"
 
 #: Shown for the piano's unnamed album, which holds the files at a library's root.
 #: "(Root)" is what Yamaha's own ENSPIRE controller calls it.
@@ -128,6 +139,93 @@ def _to_disklavier_repeat(repeat: RepeatMode, shuffle: bool) -> DkvRepeat:
     return DkvRepeat.OFF
 
 
+def _folder(
+    title: str,
+    content_id: str,
+    *,
+    media_class: MediaClass = MediaClass.DIRECTORY,
+    content_type: MediaType = MediaType.MUSIC,
+) -> BrowseMedia:
+    """Build an entry that opens a page: a folder, a library, a playlist.
+
+    No such entry is marked playable -- only the page it opens is, which puts a Play
+    button in its header. Home Assistant's media browser hides a playable card's play
+    button until the pointer hovers, and a touch screen spends the first tap revealing
+    it, so playable folders took two taps to open where every other folder took one,
+    with nothing on screen to tell them apart.
+    """
+    return BrowseMedia(
+        title=title,
+        media_class=media_class,
+        media_content_type=content_type,
+        media_content_id=content_id,
+        can_play=False,
+        can_expand=True,
+    )
+
+
+def _page(
+    title: str,
+    content_id: str,
+    children: list[BrowseMedia],
+    *,
+    children_media_class: MediaClass,
+    media_class: MediaClass = MediaClass.DIRECTORY,
+    content_type: MediaType = MediaType.MUSIC,
+    can_play: bool = False,
+) -> BrowseMedia:
+    """Build the page an entry opens onto.
+
+    Every page can search: the media browser only shows its search box on a page that
+    says so, and the search covers the whole piano whichever page it starts from.
+    """
+    return BrowseMedia(
+        title=title,
+        media_class=media_class,
+        media_content_type=content_type,
+        media_content_id=content_id,
+        can_play=can_play,
+        can_expand=True,
+        can_search=True,
+        children_media_class=children_media_class,
+        children=children,
+    )
+
+
+def _track(title: str, content_id: str) -> BrowseMedia:
+    """Build a playable song entry."""
+    return BrowseMedia(
+        title=title,
+        media_class=MediaClass.TRACK,
+        media_content_type=MediaType.MUSIC,
+        media_content_id=content_id,
+        can_play=True,
+        can_expand=False,
+    )
+
+
+def _playlist(playlist: Playlist, group: PlaylistGroup) -> BrowseMedia:
+    """Build a playlist entry, which opens like a folder and plays from its page."""
+    return _folder(
+        playlist.title,
+        f"{CONTENT_PLAYLIST}/{group.value}/{playlist.playlist_id}",
+        media_class=MediaClass.PLAYLIST,
+        content_type=MediaType.PLAYLIST,
+    )
+
+
+def _channel(channel: RadioChannel) -> BrowseMedia:
+    """Build a playable radio channel entry."""
+    return BrowseMedia(
+        title=channel.title,
+        media_class=MediaClass.CHANNEL,
+        media_content_type=MediaType.CHANNEL,
+        media_content_id=f"{CONTENT_RADIO}/{channel.channel_id}",
+        can_play=True,
+        can_expand=False,
+    )
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: DisklavierConfigEntry,
@@ -172,6 +270,14 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         #: The piano's library stamp as of the last Quick Links refresh it scheduled.
         self._library_seen: int | None = None
         self._cancel_warm_up: CALLBACK_TYPE | None = None
+        #: Each library's album listing, with the library stamp it was read under.
+        #: See ``_albums``.
+        self._album_listings: dict[SongGroup, tuple[int, list[Album]]] = {}
+        #: The position and play state as of the last poll that changed either, and
+        #: when that poll read them. See ``_track_position``.
+        self._position_seen: tuple[float | None, bool] | None = None
+        self._position_updated_at: datetime = coordinator.data.fetched_at
+        self._track_position()
 
     # ------------------------------------------------------------------
     # State
@@ -182,18 +288,43 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
 
         The firmware reports the previous state for a moment after accepting a command,
         so waiting for a poll leaves the button visibly lagging what the piano is
-        audibly doing. The next coordinator update clears this and the polled truth
-        wins.
+        audibly doing. The settle refresh that follows the command clears this and the
+        polled truth wins.
         """
         self._optimistic_state = state
         self.async_write_ha_state()
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        """Let each real poll supersede any optimistic state."""
-        self._optimistic_state = None
+        """Take each real poll, keeping an optimistic state until the settle has passed.
+
+        A scheduled poll can land inside the settle window, where it reads the state the
+        command just replaced; clearing on that would flip the entity back until the
+        settle refresh arrives, and fire state automations twice.
+        """
+        if self._cancel_settle_refresh is None:
+            self._optimistic_state = None
+        self._track_position()
         self._watch_library()
         super()._handle_coordinator_update()
+
+    @callback
+    def _track_position(self) -> None:
+        """Move ``media_position_updated_at`` only when the position or play state moves.
+
+        Each poll reads the clock afresh; passing that straight through changed an
+        attribute on every poll, so an idle piano wrote a new state every five seconds.
+        """
+        data = self.coordinator.data
+        seen = (data.current.position_seconds, data.current.is_playing)
+        if seen != self._position_seen:
+            self._position_seen = seen
+            self._position_updated_at = data.fetched_at
+
+    def _library_stamp(self) -> int | None:
+        """Return the library stamp the last poll read, if the piano reported one."""
+        master = self.coordinator.data.master
+        return None if master is None else master.library_updated
 
     @callback
     def _watch_library(self) -> None:
@@ -205,8 +336,7 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         so opening a folder later finds it already resolved. The first stamp seen,
         at startup, counts as a change.
         """
-        master = self.coordinator.data.master
-        stamp = None if master is None else master.library_updated
+        stamp = self._library_stamp()
         if stamp is None or stamp == self._library_seen:
             return
         self._library_seen = stamp
@@ -288,8 +418,8 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
 
     @property
     def media_position_updated_at(self) -> datetime:
-        """Return when the position was last read, so the UI can extrapolate."""
-        return self.coordinator.data.fetched_at
+        """Return when the position was read, so the UI can extrapolate."""
+        return self._position_updated_at
 
     @property
     def repeat(self) -> RepeatMode | None:
@@ -466,15 +596,15 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         kind, _, rest = media_content_id.partition("/")
 
         try:
-            if kind == "library":
+            if kind == CONTENT_LIBRARY:
                 return await self._browse_song_library(SongGroup(rest))
-            if kind == "album_dir":
+            if kind == CONTENT_ALBUM_DIR:
                 group_name, _, dir_path = rest.partition("/")
                 return await self._browse_album_dir(SongGroup(group_name), dir_path)
             if kind == CONTENT_ALBUM:
                 group_name, _, album_id = rest.partition("/")
                 return await self._browse_album(SongGroup(group_name), int(album_id))
-            if kind == "playlists":
+            if kind == CONTENT_PLAYLISTS:
                 return await self._browse_playlist_library(PlaylistGroup(rest))
             if kind == CONTENT_PLAYLIST:
                 group_name, _, playlist_id = rest.partition("/")
@@ -510,66 +640,27 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
 
     def _browse_root(self) -> BrowseMedia:
         """Build the top level of the browser."""
-        children = [
-            BrowseMedia(
-                title="Quick Links",
-                media_class=MediaClass.DIRECTORY,
-                media_content_type=MediaType.MUSIC,
-                media_content_id=CONTENT_QUICK_LINKS,
-                can_play=False,
-                can_expand=True,
-            )
-        ]
-        children += [
-            BrowseMedia(
-                title=title,
-                media_class=MediaClass.DIRECTORY,
-                media_content_type=MediaType.MUSIC,
-                media_content_id=f"library/{group.value}",
-                can_play=False,
-                can_expand=True,
-            )
-            for group, title in _SONG_LIBRARIES
-        ]
-        children += [
-            BrowseMedia(
-                title=title,
-                media_class=MediaClass.DIRECTORY,
-                media_content_type=MediaType.PLAYLIST,
-                media_content_id=f"playlists/{group.value}",
-                can_play=False,
-                can_expand=True,
-            )
-            for group, title in _PLAYLIST_LIBRARIES
-        ]
-        children.append(
-            BrowseMedia(
-                title="Radio",
-                media_class=MediaClass.DIRECTORY,
-                media_content_type=MediaType.MUSIC,
-                media_content_id=CONTENT_RADIO,
-                can_play=False,
-                can_expand=True,
-            )
-        )
-        children.append(
-            BrowseMedia(
-                title="Surprise Me",
-                media_class=MediaClass.DIRECTORY,
-                media_content_type=MediaType.MUSIC,
-                media_content_id=CONTENT_RANDOM,
-                can_play=False,
-                can_expand=True,
-            )
-        )
-        return BrowseMedia(
-            title="Disklavier",
-            media_class=MediaClass.DIRECTORY,
-            media_content_type=MediaType.MUSIC,
-            media_content_id="root",
-            can_play=False,
-            can_expand=True,
-            children=children,
+        return _page(
+            "Disklavier",
+            "root",
+            [
+                _folder(_QUICK_LINKS_TITLE, CONTENT_QUICK_LINKS),
+                *(
+                    _folder(title, f"{CONTENT_LIBRARY}/{group.value}")
+                    for group, title in _SONG_LIBRARIES
+                ),
+                *(
+                    _folder(
+                        title,
+                        f"{CONTENT_PLAYLISTS}/{group.value}",
+                        content_type=MediaType.PLAYLIST,
+                    )
+                    for group, title in _PLAYLIST_LIBRARIES
+                ),
+                _folder(_RADIO_TITLE, CONTENT_RADIO),
+                _folder(_SURPRISE_ME_TITLE, CONTENT_RANDOM),
+            ],
+            children_media_class=MediaClass.DIRECTORY,
         )
 
     async def _browse_song_library(self, group: SongGroup) -> BrowseMedia:
@@ -581,7 +672,7 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         albums is listed flat. An empty library comes back as an empty list from the
         client, so anything raising here is a real fault and is reported as one.
         """
-        albums = await self.coordinator.client.async_get_albums(group)
+        albums = await self._albums(group)
 
         children: list[BrowseMedia]
         if albums:
@@ -593,15 +684,11 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
                 group, await self.coordinator.client.async_get_songs(group)
             )
 
-        return BrowseMedia(
-            title=dict(_SONG_LIBRARIES).get(group, group.value),
-            media_class=MediaClass.DIRECTORY,
-            media_content_type=MediaType.MUSIC,
-            media_content_id=f"library/{group.value}",
-            can_play=False,
-            can_expand=True,
+        return _page(
+            dict(_SONG_LIBRARIES).get(group, group.value),
+            f"{CONTENT_LIBRARY}/{group.value}",
+            children,
             children_media_class=children_class,
-            children=children,
         )
 
     async def _browse_album_dir(self, group: SongGroup, path: str) -> BrowseMedia:
@@ -610,18 +697,31 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         These levels have no ids of their own on the piano; they exist only as the
         ``/``-separated prefixes of album titles.
         """
-        albums = await self.coordinator.client.async_get_albums(group)
+        albums = await self._albums(group)
 
-        return BrowseMedia(
-            title=path.rsplit("/", 1)[-1],
-            media_class=MediaClass.DIRECTORY,
-            media_content_type=MediaType.MUSIC,
-            media_content_id=f"album_dir/{group.value}/{path}",
-            can_play=False,
-            can_expand=True,
+        return _page(
+            path.rsplit("/", 1)[-1],
+            f"{CONTENT_ALBUM_DIR}/{group.value}/{path}",
+            self._album_level_nodes(group, albums, path),
             children_media_class=MediaClass.DIRECTORY,
-            children=self._album_level_nodes(group, albums, path),
         )
+
+    async def _albums(self, group: SongGroup) -> list[Album]:
+        """Return a library's album listing, read again only once the library changes.
+
+        The piano takes about two seconds to build the listing for a few hundred albums,
+        and every folder level and album page needs it. It can only change with a
+        reindex, which moves the library stamp, so it is kept under the stamp it was
+        read with; without a stamp it is read every time.
+        """
+        stamp = self._library_stamp()
+        listing = self._album_listings.get(group)
+        if stamp is not None and listing is not None and listing[0] == stamp:
+            return listing[1]
+        albums = await self.coordinator.client.async_get_albums(group)
+        if stamp is not None and albums:
+            self._album_listings[group] = (stamp, albums)
+        return albums
 
     def _album_level_nodes(
         self, group: SongGroup, albums: list[Album], path: str
@@ -633,12 +733,6 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         whose remaining title holds no separator is a folder of songs, and every
         distinct leading segment becomes a virtual directory, kept in the piano's own
         ordering at first appearance.
-
-        No folder entry in a listing is marked playable -- only a folder's own page is,
-        which puts a Play button in its header. Home Assistant's media browser hides a
-        playable card's play button until the pointer hovers, and a touch screen spends
-        the first tap revealing it, so playable folders took two taps to open where
-        every other folder took one, with nothing on screen to tell them apart.
         """
         prefix = f"{path}/" if path else ""
         seen_dirs: set[str] = set()
@@ -657,84 +751,49 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
             if sep:
                 if head not in seen_dirs:
                     seen_dirs.add(head)
-                    dir_path = f"{prefix}{head}"
                     nodes.append(
-                        BrowseMedia(
-                            title=head,
-                            media_class=MediaClass.DIRECTORY,
-                            media_content_type=MediaType.MUSIC,
-                            media_content_id=f"album_dir/{group.value}/{dir_path}",
-                            can_play=False,
-                            can_expand=True,
+                        _folder(
+                            head, f"{CONTENT_ALBUM_DIR}/{group.value}/{prefix}{head}"
                         )
                     )
             else:
                 nodes.append(
-                    BrowseMedia(
-                        title=head or _UNNAMED_FOLDER,
-                        media_class=MediaClass.DIRECTORY,
-                        media_content_type=MediaType.MUSIC,
-                        media_content_id=(
-                            f"{CONTENT_ALBUM}/{group.value}/{album.album_id}"
-                        ),
-                        can_play=False,
-                        can_expand=True,
+                    _folder(
+                        head or _UNNAMED_FOLDER,
+                        f"{CONTENT_ALBUM}/{group.value}/{album.album_id}",
                     )
                 )
         return nodes
 
     async def _browse_album(self, group: SongGroup, album_id: int) -> BrowseMedia:
         """List the songs inside one folder of a library."""
-        albums = await self.coordinator.client.async_get_albums(group)
+        albums = await self._albums(group)
         songs = await self.coordinator.client.async_get_songs_in_album(album_id, group)
         title = next((a.title for a in albums if a.album_id == album_id), "")
-        return self._album_node(group, album_id, title, songs)
-
-    def _album_node(
-        self, group: SongGroup, album_id: int, title: str, songs: list[Song]
-    ) -> BrowseMedia:
-        """Build one folder's page from an album title and songs already in hand."""
         # Path-titled albums ("ImpromptuApp/Alban Berg") show just their last segment;
         # the parents are rendered as the virtual folder levels above this page.
-        title = title.rsplit("/", 1)[-1]
-
-        return BrowseMedia(
-            title=title or _UNNAMED_FOLDER,
-            media_class=MediaClass.DIRECTORY,
-            media_content_type=MediaType.MUSIC,
-            media_content_id=f"{CONTENT_ALBUM}/{group.value}/{album_id}",
-            can_play=True,
-            can_expand=True,
+        return _page(
+            title.rsplit("/", 1)[-1] or _UNNAMED_FOLDER,
+            f"{CONTENT_ALBUM}/{group.value}/{album_id}",
+            self._song_nodes(group, songs),
             children_media_class=MediaClass.TRACK,
-            children=self._song_nodes(group, songs),
+            can_play=True,
         )
 
     def _browse_quick_links(self) -> BrowseMedia:
         """List the curated one-tap shortcuts onto specific PC Sharing Folder folders.
 
         Each entry opens the folder's page, same as a folder found by browsing PC
-        Sharing Folder directly -- this is just a shorter path there. Like every
-        folder entry it is not itself playable; see ``_album_level_nodes``.
+        Sharing Folder directly -- this is just a shorter path there.
         """
-        return BrowseMedia(
-            title="Quick Links",
-            media_class=MediaClass.DIRECTORY,
-            media_content_type=MediaType.MUSIC,
-            media_content_id=CONTENT_QUICK_LINKS,
-            can_play=False,
-            can_expand=True,
-            children_media_class=MediaClass.DIRECTORY,
-            children=[
-                BrowseMedia(
-                    title=title,
-                    media_class=MediaClass.DIRECTORY,
-                    media_content_type=MediaType.MUSIC,
-                    media_content_id=f"{CONTENT_QUICK_LINK}/{folder}",
-                    can_play=False,
-                    can_expand=True,
-                )
+        return _page(
+            _QUICK_LINKS_TITLE,
+            CONTENT_QUICK_LINKS,
+            [
+                _folder(title, f"{CONTENT_QUICK_LINK}/{folder}")
                 for folder, title in _QUICK_LINKS
             ],
+            children_media_class=MediaClass.DIRECTORY,
         )
 
     async def _find_album_by_folder_name(self, folder: str) -> Album | None:
@@ -773,8 +832,9 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         album's songs and compares them with last time's. The same songs under the
         same ids can only have come from the same folder, so the album still stands;
         anything else -- songs synced in, a folder moved, ids reassigned by a
-        reindex -- goes back through the full lookup. ``_watch_library`` runs this
-        after every reindex, so a visit normally finds the work already done.
+        reindex, or the piano answering "no album" for an id it no longer has -- goes
+        back through the full lookup. ``_watch_library`` runs this after every
+        reindex, so a visit normally finds the work already done.
         """
         client = self.coordinator.client
         group = SongGroup.PC_SHARING_FOLDER
@@ -782,9 +842,15 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         remembered = self._quick_links.get(folder)
         if remembered is not None:
             album, seen = remembered
-            songs = await client.async_get_songs_in_album(album.album_id, group)
-            if frozenset(songs) == seen:
-                return album, songs
+            try:
+                songs = await client.async_get_songs_in_album(album.album_id, group)
+            except DisklavierResponseError:
+                # An id the piano no longer has raises "no album" rather than listing
+                # nothing: the folder has moved, so look it up again below.
+                pass
+            else:
+                if frozenset(songs) == seen:
+                    return album, songs
 
         found = await self._find_album_by_folder_name(folder)
         if found is None:
@@ -794,7 +860,7 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         if songs:
             self._quick_links[folder] = (found, frozenset(songs))
         else:
-            # An empty listing is also what a stale id gets back, so it proves nothing.
+            # An empty listing gives a later visit nothing to check against.
             self._quick_links.pop(folder, None)
         return found, songs
 
@@ -803,24 +869,20 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
 
         Without this, reaching e.g. Favourites means PC Sharing Folder ->
         HousePianistApp -> Favourites -- three taps to the one folder that matters
-        most day to day.
+        most day to day. The page keeps the link's own name and id, so playing or
+        picking it (an automation's media picker saves that id) finds the folder by
+        name at the time, not by an album id that moves when the folder is recreated.
         """
         title = next((t for f, t in _QUICK_LINKS if f == folder), folder)
         resolved = await self._resolve_quick_link(folder)
-        if resolved is None:
-            return BrowseMedia(
-                title=title,
-                media_class=MediaClass.DIRECTORY,
-                media_content_type=MediaType.MUSIC,
-                media_content_id=f"{CONTENT_QUICK_LINK}/{folder}",
-                can_play=False,
-                can_expand=True,
-                children_media_class=MediaClass.TRACK,
-                children=[],
-            )
-        album, songs = resolved
-        return self._album_node(
-            SongGroup.PC_SHARING_FOLDER, album.album_id, album.title, songs
+        return _page(
+            title,
+            f"{CONTENT_QUICK_LINK}/{folder}",
+            []
+            if resolved is None
+            else self._song_nodes(SongGroup.PC_SHARING_FOLDER, resolved[1]),
+            children_media_class=MediaClass.TRACK,
+            can_play=resolved is not None,
         )
 
     async def _async_play_quick_link(self, folder: str) -> None:
@@ -854,14 +916,7 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
     def _song_nodes(self, group: SongGroup, songs: list[Song]) -> list[BrowseMedia]:
         """Build playable track nodes for the songs of one library or folder."""
         return [
-            BrowseMedia(
-                title=song.title,
-                media_class=MediaClass.TRACK,
-                media_content_type=MediaType.MUSIC,
-                media_content_id=f"{CONTENT_SONG}/{group.value}/{song.song_id}",
-                can_play=True,
-                can_expand=False,
-            )
+            _track(song.title, f"{CONTENT_SONG}/{group.value}/{song.song_id}")
             for song in songs
         ]
 
@@ -869,29 +924,12 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         """List the playlists in one library."""
         playlists = await self.coordinator.client.async_get_playlists(group)
 
-        return BrowseMedia(
-            title=dict(_PLAYLIST_LIBRARIES).get(group, group.value),
-            media_class=MediaClass.DIRECTORY,
-            media_content_type=MediaType.PLAYLIST,
-            media_content_id=f"playlists/{group.value}",
-            can_play=False,
-            can_expand=True,
+        return _page(
+            dict(_PLAYLIST_LIBRARIES).get(group, group.value),
+            f"{CONTENT_PLAYLISTS}/{group.value}",
+            [_playlist(playlist, group) for playlist in playlists],
             children_media_class=MediaClass.PLAYLIST,
-            children=[
-                BrowseMedia(
-                    title=playlist.title,
-                    media_class=MediaClass.PLAYLIST,
-                    media_content_type=MediaType.PLAYLIST,
-                    media_content_id=(
-                        f"{CONTENT_PLAYLIST}/{group.value}/{playlist.playlist_id}"
-                    ),
-                    # Opens in one tap; the playlist's page plays it. See
-                    # _album_level_nodes.
-                    can_play=False,
-                    can_expand=True,
-                )
-                for playlist in playlists
-            ],
+            content_type=MediaType.PLAYLIST,
         )
 
     async def _browse_playlist(
@@ -902,27 +940,19 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
             playlist_id, group
         )
 
-        return BrowseMedia(
-            title="Playlist",
-            media_class=MediaClass.PLAYLIST,
-            media_content_type=MediaType.PLAYLIST,
-            media_content_id=f"{CONTENT_PLAYLIST}/{group.value}/{playlist_id}",
-            can_play=True,
-            can_expand=True,
-            children_media_class=MediaClass.TRACK,
-            children=[
-                BrowseMedia(
-                    title=item.title,
-                    media_class=MediaClass.TRACK,
-                    media_content_type=MediaType.MUSIC,
-                    media_content_id=(
-                        f"{CONTENT_PLAYLIST_ITEM}/{group.value}/{item.song_id}"
-                    ),
-                    can_play=True,
-                    can_expand=False,
+        return _page(
+            "Playlist",
+            f"{CONTENT_PLAYLIST}/{group.value}/{playlist_id}",
+            [
+                _track(
+                    item.title, f"{CONTENT_PLAYLIST_ITEM}/{group.value}/{item.song_id}"
                 )
                 for item in items
             ],
+            children_media_class=MediaClass.TRACK,
+            media_class=MediaClass.PLAYLIST,
+            content_type=MediaType.PLAYLIST,
+            can_play=True,
         )
 
     def _browse_random(self) -> BrowseMedia:
@@ -931,25 +961,14 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         The randomness is the piano's own -- ``select=random`` in the firmware -- so
         this browse level needs no request at all.
         """
-        return BrowseMedia(
-            title="Surprise Me",
-            media_class=MediaClass.DIRECTORY,
-            media_content_type=MediaType.MUSIC,
-            media_content_id=CONTENT_RANDOM,
-            can_play=False,
-            can_expand=True,
-            children_media_class=MediaClass.TRACK,
-            children=[
-                BrowseMedia(
-                    title=title,
-                    media_class=MediaClass.TRACK,
-                    media_content_type=MediaType.MUSIC,
-                    media_content_id=f"{CONTENT_RANDOM}/{genre.value}",
-                    can_play=True,
-                    can_expand=False,
-                )
+        return _page(
+            _SURPRISE_ME_TITLE,
+            CONTENT_RANDOM,
+            [
+                _track(title, f"{CONTENT_RANDOM}/{genre.value}")
                 for genre, title in _RANDOM_GENRES
             ],
+            children_media_class=MediaClass.TRACK,
         )
 
     # ------------------------------------------------------------------
@@ -962,6 +981,8 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         The ranking runs in aiodisklavier over the piano's own song database, so one
         fetch covers every library and each result plays by exact id -- unlike the
         firmware's ``search_title``, which plays its single fuzzy pick sight unseen.
+        A requested media class narrows the results: Assist asks for tracks when told
+        to play "the song …", then plays whatever comes first.
         """
         try:
             results = await self.coordinator.client.async_search(query.search_query)
@@ -980,16 +1001,10 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
                 and result.song.group is not None
             ):
                 items.append(
-                    BrowseMedia(
-                        title=result.title,
-                        media_class=MediaClass.TRACK,
-                        media_content_type=MediaType.MUSIC,
-                        media_content_id=(
-                            f"{CONTENT_SONG}/{result.song.group.value}"
-                            f"/{result.song.song_id}"
-                        ),
-                        can_play=True,
-                        can_expand=False,
+                    _track(
+                        result.song.title,
+                        f"{CONTENT_SONG}/{result.song.group.value}"
+                        f"/{result.song.song_id}",
                     )
                 )
             elif (
@@ -997,34 +1012,13 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
                 and result.playlist is not None
                 and result.playlist_group is not None
             ):
-                items.append(
-                    BrowseMedia(
-                        title=result.title,
-                        media_class=MediaClass.PLAYLIST,
-                        media_content_type=MediaType.PLAYLIST,
-                        media_content_id=(
-                            f"{CONTENT_PLAYLIST}/{result.playlist_group.value}"
-                            f"/{result.playlist.playlist_id}"
-                        ),
-                        # Opens in one tap; the playlist's page plays it. See
-                        # _album_level_nodes.
-                        can_play=False,
-                        can_expand=True,
-                    )
-                )
+                items.append(_playlist(result.playlist, result.playlist_group))
             elif result.kind is SearchKind.RADIO and result.channel is not None:
-                items.append(
-                    BrowseMedia(
-                        title=result.title,
-                        media_class=MediaClass.CHANNEL,
-                        media_content_type=MediaType.CHANNEL,
-                        media_content_id=(
-                            f"{CONTENT_RADIO}/{result.channel.channel_id}"
-                        ),
-                        can_play=True,
-                        can_expand=False,
-                    )
-                )
+                items.append(_channel(result.channel))
+        if query.media_filter_classes:
+            items = [
+                item for item in items if item.media_class in query.media_filter_classes
+            ]
         return SearchMedia(result=items)
 
     async def _browse_radio(self) -> BrowseMedia:
@@ -1034,23 +1028,9 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         """
         channels = await self.coordinator.client.async_get_radio_channels()
 
-        return BrowseMedia(
-            title="Radio",
-            media_class=MediaClass.DIRECTORY,
-            media_content_type=MediaType.MUSIC,
-            media_content_id=CONTENT_RADIO,
-            can_play=False,
-            can_expand=True,
+        return _page(
+            _RADIO_TITLE,
+            CONTENT_RADIO,
+            [_channel(channel) for channel in channels],
             children_media_class=MediaClass.CHANNEL,
-            children=[
-                BrowseMedia(
-                    title=channel.title,
-                    media_class=MediaClass.CHANNEL,
-                    media_content_type=MediaType.CHANNEL,
-                    media_content_id=f"{CONTENT_RADIO}/{channel.channel_id}",
-                    can_play=True,
-                    can_expand=False,
-                )
-                for channel in channels
-            ],
         )
