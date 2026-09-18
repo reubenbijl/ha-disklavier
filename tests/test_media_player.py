@@ -12,6 +12,7 @@ from aiodisklavier import (
     Genre,
     GenreSelect,
     LibrarySong,
+    MasterState,
     PlaybackStatus,
     Playlist,
     PlaylistGroup,
@@ -50,19 +51,21 @@ from homeassistant.const import (
     SERVICE_TURN_OFF,
     SERVICE_TURN_ON,
     SERVICE_VOLUME_SET,
+    STATE_BUFFERING,
     STATE_IDLE,
     STATE_OFF,
     STATE_PAUSED,
     STATE_PLAYING,
+    STATE_UNKNOWN,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_fire_time_changed,
 )
 
-from .conftest import setup_integration, share_db
+from .conftest import on_the_radio, setup_integration, share_db
 
 ENTITY = "media_player.disklavier_pro"
 
@@ -153,6 +156,13 @@ async def test_an_idle_piano_does_not_write_a_new_state_every_poll(
         # piano ignores commands for about twelve seconds while waking.
         ({"power_status": PowerStatus.SLEEP}, STATE_OFF),
         ({"power_status": PowerStatus.WAKEUP}, STATE_OFF),
+        # The radio is the piano making music. aiodisklavier used to read "radio" as
+        # paused, so a piano playing the radio showed here as paused too.
+        ({"playback_status": PlaybackStatus.RADIO, "position_ms": 0}, STATE_PLAYING),
+        # A second or two while the sequencer loads a song.
+        ({"playback_status": PlaybackStatus.LOAD, "position_ms": 0}, STATE_BUFFERING),
+        # A status aiodisklavier has no name for is unknown, not dressed as paused.
+        ({"playback_status": None}, STATE_UNKNOWN),
     ],
 )
 async def test_state_mapping(
@@ -574,7 +584,27 @@ async def test_search_media_maps_every_kind(
     ]
     assert [item.can_play for item in media.result] == [True, False, True]
     assert [item.can_expand for item in media.result] == [False, True, False]
-    mock_client.async_search.assert_awaited_once_with("Clair de lune")
+    # The fixture's piano is part-way through a song and no channel list has been read,
+    # so the search must not ask for radio: doing so would read the list, and that
+    # read stops the music.
+    mock_client.async_search.assert_awaited_once_with(
+        "Clair de lune", include_radio=False
+    )
+
+
+async def test_search_includes_radio_once_the_channel_list_is_held(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """With the list already read, searching radio costs nothing, so it is searched."""
+    init_integration.runtime_data.radio_channels = [
+        RadioChannel(channel_id=5, title="Classical Romance")
+    ]
+
+    component = hass.data["entity_components"]["media_player"]
+    entity = component.get_entity(ENTITY)
+    await entity.async_search_media(SearchMediaQuery(search_query="Romance"))
+
+    mock_client.async_search.assert_awaited_once_with("Romance", include_radio=True)
 
 
 async def test_search_media_honours_a_media_class_filter(
@@ -682,3 +712,213 @@ async def test_browse_unknown_id_raises(
     with pytest.raises(HomeAssistantError) as err:
         await entity.async_browse_media(media_content_id="nonsense/thing")
     assert err.value.translation_key == "unsupported_media_id"
+
+
+# ----------------------------------------------------------------------
+# Radio
+# ----------------------------------------------------------------------
+#
+# Found on hardware, all of it. DisklavierRadio is a mode that takes the piano over:
+# while a channel plays, the firmware answers play, pause, stop, next and every request
+# to play something else with HTTP 200 and ignores them. Left alone, every one of those
+# buttons appears to do nothing.
+
+
+@pytest.fixture
+async def radio_playing(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_client: AsyncMock,
+    current_info: CurrentInfo,
+    master_state: MasterState,
+) -> MockConfigEntry:
+    """Set the integration up with a radio channel playing."""
+    current, master = on_the_radio(current_info, master_state)
+    mock_client.async_get_current_info.return_value = current
+    mock_client.async_get_master_state.return_value = master
+    await setup_integration(hass, mock_config_entry)
+    return mock_config_entry
+
+
+async def _call(hass: HomeAssistant, service: str) -> None:
+    await hass.services.async_call(
+        MP_DOMAIN, service, {ATTR_ENTITY_ID: ENTITY}, blocking=True
+    )
+
+
+async def test_the_radio_programme_is_the_media(
+    hass: HomeAssistant, radio_playing: MockConfigEntry
+) -> None:
+    """During radio the title comes from the extended state, and the channel is named.
+
+    The open API reports no title, a position of zero and a length of zero, so none of
+    those is passed on as if it meant something.
+    """
+    state = hass.states.get(ENTITY)
+    assert state.state == STATE_PLAYING
+    assert state.attributes["media_title"] == "Lullaby of Birdland"
+    assert state.attributes["media_channel"] == "Complimentary Channel Sampler"
+    assert state.attributes["media_content_type"] == "channel"
+    assert "media_duration" not in state.attributes
+    assert "media_position" not in state.attributes
+
+
+async def test_the_radio_programme_without_the_extended_state(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_client: AsyncMock,
+    current_info: CurrentInfo,
+    master_state: MasterState,
+) -> None:
+    """The extended state is best-effort; without it the radio plays on, untitled."""
+    current, _ = on_the_radio(current_info, master_state)
+    mock_client.async_get_current_info.return_value = current
+    mock_client.async_get_master_state.side_effect = DisklavierCommandError("no")
+    await setup_integration(hass, mock_config_entry)
+
+    state = hass.states.get(ENTITY)
+    assert state.state == STATE_PLAYING
+    assert "media_title" not in state.attributes
+    assert "media_channel" not in state.attributes
+
+
+async def test_a_song_has_no_channel(
+    hass: HomeAssistant, init_integration: MockConfigEntry
+) -> None:
+    """Outside radio there is no channel, and the content is music."""
+    state = hass.states.get(ENTITY)
+    assert "media_channel" not in state.attributes
+    assert state.attributes["media_content_type"] == "music"
+
+
+@pytest.mark.parametrize("service", [SERVICE_MEDIA_PAUSE, SERVICE_MEDIA_STOP])
+async def test_pause_and_stop_end_the_radio(
+    hass: HomeAssistant,
+    radio_playing: MockConfigEntry,
+    mock_client: AsyncMock,
+    service: str,
+) -> None:
+    """A channel cannot be paused, only ended -- and whoever pressed pause wants quiet."""
+    await _call(hass, service)
+
+    mock_client.async_stop_radio.assert_awaited_once_with()
+    mock_client.async_pause.assert_not_awaited()
+    mock_client.async_stop.assert_not_awaited()
+    assert hass.states.get(ENTITY).state == STATE_IDLE
+
+
+async def test_play_leaves_a_playing_radio_alone(
+    hass: HomeAssistant, radio_playing: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """It is playing already; the piano would ignore the command in any case."""
+    await _call(hass, SERVICE_MEDIA_PLAY)
+    mock_client.async_play.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("service", "method"),
+    [
+        (SERVICE_MEDIA_NEXT_TRACK, "async_next_song"),
+        (SERVICE_MEDIA_PREVIOUS_TRACK, "async_previous_song"),
+    ],
+)
+async def test_skipping_during_radio_says_why_it_cannot(
+    hass: HomeAssistant,
+    radio_playing: MockConfigEntry,
+    mock_client: AsyncMock,
+    service: str,
+    method: str,
+) -> None:
+    """The piano swallows these during radio, so the reason is given instead."""
+    with pytest.raises(ServiceValidationError) as err:
+        await _call(hass, service)
+    assert err.value.translation_key == "radio_active"
+    getattr(mock_client, method).assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("content_id", "method"),
+    [
+        ("song/built_in_songs/1", "async_play_song"),
+        ("album/built_in_songs/9", "async_play_album"),
+        ("playlist/playlists/1", "async_play_playlist"),
+        ("playlist_item/playlists/1", "async_play_playlist_item"),
+        ("random/jazz", "async_play_genre"),
+        ("search/Clair de lune", "async_play_search"),
+    ],
+)
+async def test_playing_something_else_ends_the_radio_first(
+    hass: HomeAssistant,
+    radio_playing: MockConfigEntry,
+    mock_client: AsyncMock,
+    content_id: str,
+    method: str,
+) -> None:
+    """The radio is stopped, and only then is the piano asked to play.
+
+    Without the stop the piano accepts the request and ignores it, and the media
+    browser appears to do nothing. aiodisklavier's ``async_stop_radio`` returns once
+    the piano will take a command again, so the order is all that matters here.
+    """
+    order: list[str] = []
+    mock_client.async_stop_radio.side_effect = lambda: order.append("stop_radio")
+    getattr(mock_client, method).side_effect = lambda *a, **k: order.append("play")
+
+    await _play_media(hass, content_id)
+
+    assert order == ["stop_radio", "play"]
+
+
+async def test_playing_a_quick_link_ends_the_radio_first(
+    hass: HomeAssistant, radio_playing: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """Quick Links resolve a folder before playing it, and take the same care."""
+    mock_client.async_get_song_db.return_value = share_db(
+        (2, "HousePianistApp/Favourites")
+    )
+    await _play_media(hass, "quick_link/favourites")
+
+    mock_client.async_stop_radio.assert_awaited_once_with()
+    mock_client.async_play_album.assert_awaited_once_with(
+        2, SongGroup.PC_SHARING_FOLDER
+    )
+
+
+async def test_one_channel_replaces_another_directly(
+    hass: HomeAssistant, radio_playing: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """Changing channel needs no stop in between."""
+    await _play_media(hass, "radio/5")
+    mock_client.async_play_radio.assert_awaited_once_with(5)
+    mock_client.async_stop_radio.assert_not_awaited()
+
+
+async def test_a_bad_media_id_does_not_cost_the_radio(
+    hass: HomeAssistant, radio_playing: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """The id is checked before anything is sent, so a typo leaves the radio playing."""
+    with pytest.raises(HomeAssistantError) as err:
+        await _play_media(hass, "song/no_such_library/1")
+    assert err.value.translation_key == "unsupported_media_id"
+    mock_client.async_stop_radio.assert_not_awaited()
+
+
+async def test_a_radio_that_will_not_stop_is_reported(
+    hass: HomeAssistant, radio_playing: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """If the radio cannot be ended, nothing else is attempted, and the error says so."""
+    mock_client.async_stop_radio.side_effect = DisklavierCommandError("no")
+
+    with pytest.raises(HomeAssistantError) as err:
+        await _play_media(hass, "song/built_in_songs/1")
+    assert err.value.translation_key == "command_failed"
+    mock_client.async_play_song.assert_not_awaited()
+
+
+async def test_outside_radio_nothing_is_stopped_first(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """With no radio on, playing something is one command, as it always was."""
+    await _play_media(hass, "song/built_in_songs/1")
+    mock_client.async_stop_radio.assert_not_awaited()
+    mock_client.async_play_song.assert_awaited_once_with(1, SongGroup.BUILT_IN_SONGS)

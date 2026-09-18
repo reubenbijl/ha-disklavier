@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -10,9 +11,12 @@ from aiodisklavier import (
     CurrentInfo,
     Disklavier,
     DisklavierConnectionError,
+    DisklavierEnvelopeError,
     DisklavierError,
     LibrarySong,
     MasterState,
+    PowerStatus,
+    RadioChannel,
     StaticInfo,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -49,6 +53,19 @@ class DisklavierData:
     fetched_at: datetime
 
 
+def radio_list_is_free(current: CurrentInfo) -> bool:
+    """Whether the radio channel list can be read without costing the listener anything.
+
+    Asking the piano for it looks like a read and is not: the firmware stops its
+    sequencer to fetch the list, so a song that is playing falls silent and one that is
+    paused part-way is rewound to the start. Only a piano that is on and already stopped
+    has nothing to lose -- or one playing the radio itself, which carries on undisturbed.
+    """
+    return current.power_status is PowerStatus.ON and (
+        current.is_stopped or current.is_radio
+    )
+
+
 class DisklavierCoordinator(DataUpdateCoordinator[DisklavierData]):
     """Poll a Disklavier for its current state."""
 
@@ -75,6 +92,13 @@ class DisklavierCoordinator(DataUpdateCoordinator[DisklavierData]):
         #: The library stamp the client's song database is known to be current for.
         #: See ``_async_follow_library``.
         self._library_seen: int | None = None
+        #: DisklavierRadio's channels, once they have been read: ``None`` until then, and
+        #: an empty list where the piano says the service is not available. Search and
+        #: the media browser work from this and never from a fresh read, because a fresh
+        #: read stops the music -- see ``radio_list_is_free``. It is kept for the life of
+        #: the config entry; reload the integration to pick up a changed line-up.
+        self.radio_channels: list[RadioChannel] | None = None
+        self._radio_read: asyncio.Task[None] | None = None
 
     async def _async_update_data(self) -> DisklavierData:
         """Fetch the piano's current state."""
@@ -90,6 +114,8 @@ class DisklavierCoordinator(DataUpdateCoordinator[DisklavierData]):
         # Anchor position extrapolation to the moment the position was actually read,
         # not to whenever the follow-up fetches finish.
         fetched_at = dt_util.utcnow()
+
+        self._read_radio_channels_when_free(current)
 
         master: MasterState | None = None
         try:
@@ -147,3 +173,44 @@ class DisklavierCoordinator(DataUpdateCoordinator[DisklavierData]):
         except DisklavierError:
             return
         self._library_seen = stamp
+
+    def _read_radio_channels_when_free(self, current: CurrentInfo) -> None:
+        """Read the radio channel list in the background, the first time it is harmless.
+
+        So that by the time anyone searches or opens the Radio page, the list is already
+        here and nothing has to be interrupted to get it. In the background because the
+        read takes three or four seconds, which a poll should not wait for.
+        """
+        if self.radio_channels is not None or not radio_list_is_free(current):
+            return
+        # Asked of the task itself rather than tracked with a flag the task clears.
+        # Home Assistant starts tasks eagerly, so a read that fails before it ever
+        # suspends has run to the end -- cleanup included -- by the time the handle is
+        # assigned here, and a flag cleared that early would then be set for good.
+        if self._radio_read is not None and not self._radio_read.done():
+            return
+        self._radio_read = self.config_entry.async_create_background_task(
+            self.hass, self._async_read_radio_channels(), f"{DOMAIN} radio channels"
+        )
+
+    async def _async_read_radio_channels(self) -> None:
+        """Do the background read, leaving a failure for a later poll to try again."""
+        try:
+            await self.async_read_radio_channels()
+        except DisklavierError as err:
+            _LOGGER.debug("Could not read the radio channels, will try again: %s", err)
+
+    async def async_read_radio_channels(self) -> list[RadioChannel]:
+        """Read the radio channel list now, and keep it.
+
+        The caller has decided the interruption is acceptable -- see
+        ``radio_list_is_free``. A piano that declines, as one in a region without
+        DisklavierRadio does, has no channels; that is an answer, not a failure, and it
+        is remembered so the question is not put again.
+        """
+        try:
+            self.radio_channels = await self.client.async_get_radio_channels()
+        except DisklavierEnvelopeError as err:
+            _LOGGER.debug("DisklavierRadio is not available: %s", err)
+            self.radio_channels = []
+        return self.radio_channels

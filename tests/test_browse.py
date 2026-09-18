@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
+from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 from aiodisklavier import (
     Album,
+    CurrentInfo,
     DisklavierConnectionError,
+    DisklavierEnvelopeError,
     DisklavierResponseError,
     LibraryAlbum,
     MasterState,
+    PlaybackStatus,
     Playlist,
+    PowerStatus,
     RadioChannel,
     Song,
     SongDatabase,
@@ -28,9 +34,9 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
-from custom_components.disklavier.const import LIBRARY_SETTLE_SECONDS
+from custom_components.disklavier.const import LIBRARY_SETTLE_SECONDS, SCAN_INTERVAL
 
-from .conftest import share_db
+from .conftest import on_the_radio, setup_integration, share_db
 
 ENTITY = "media_player.disklavier_pro"
 
@@ -219,17 +225,209 @@ async def test_browse_inside_a_playlist(
     mock_client.async_get_playlist_items.assert_awaited()
 
 
+SAMPLER = RadioChannel(channel_id=1, title="Complimentary Channel Sampler")
+
+
 async def test_browse_radio(
-    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_client: AsyncMock,
+    current_info: CurrentInfo,
 ) -> None:
-    """Radio channels are listed and playable."""
-    mock_client.async_get_radio_channels.return_value = [
-        RadioChannel(channel_id=1, title="Complimentary Channel Sampler")
-    ]
+    """Radio channels are listed and playable, from a list read before anyone asked.
+
+    Reading the channel list is not free: the firmware stops its sequencer to fetch it,
+    so a playing song falls silent and a paused one is rewound. The coordinator
+    therefore reads it in the background the first time that costs nothing -- here, a
+    piano that is on and stopped -- and the Radio page is served from that copy.
+    """
+    mock_client.async_get_current_info.return_value = replace(
+        current_info, position_ms=0
+    )
+    mock_client.async_get_radio_channels.return_value = [SAMPLER]
+    await setup_integration(hass, mock_config_entry)
+    mock_client.async_get_radio_channels.assert_awaited_once()
 
     node = await _browse(hass, "radio")
     assert [child.title for child in node.children] == ["Complimentary Channel Sampler"]
     assert node.children[0].can_play is True
+    # Opening the page asked the piano for nothing.
+    mock_client.async_get_radio_channels.assert_awaited_once()
+
+
+async def test_browsing_radio_never_interrupts_what_is_playing(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """With a song part-way through and no list yet, the page explains itself instead.
+
+    The fixture's piano is paused at 8:36. Reading the channel list now would rewind it
+    to the start -- and had it been playing, stop it -- for someone who was only looking.
+    """
+    mock_client.async_get_radio_channels.assert_not_awaited()
+
+    with pytest.raises(HomeAssistantError) as err:
+        await _browse(hass, "radio")
+    assert err.value.translation_key == "radio_list_would_interrupt"
+    mock_client.async_get_radio_channels.assert_not_awaited()
+
+
+async def test_browse_radio_reads_the_list_when_nothing_would_be_lost(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_client: AsyncMock,
+    current_info: CurrentInfo,
+) -> None:
+    """If the background read has not happened yet, a harmless moment will do."""
+    coordinator = init_integration.runtime_data
+    mock_client.async_get_radio_channels.return_value = [SAMPLER]
+    # The piano has been stopped since the last poll; no background read has run.
+    coordinator.data = replace(
+        coordinator.data, current=replace(current_info, position_ms=0)
+    )
+
+    node = await _browse(hass, "radio")
+    assert [child.title for child in node.children] == ["Complimentary Channel Sampler"]
+    assert coordinator.radio_channels == [SAMPLER]
+
+
+async def test_browse_radio_where_there_is_no_radio(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_client: AsyncMock,
+    current_info: CurrentInfo,
+    freezer,
+) -> None:
+    """A region without DisklavierRadio has an empty Radio page, asked about once.
+
+    The piano declines with an error envelope. That is an answer, not a fault, so it is
+    remembered rather than put to the piano again on every poll.
+    """
+    mock_client.async_get_current_info.return_value = replace(
+        current_info, position_ms=0
+    )
+    mock_client.async_get_radio_channels.side_effect = DisklavierEnvelopeError(
+        "Disklavier command 'get_radio_channel_list' failed: not available",
+        command="get_radio_channel_list",
+        error_info="not available",
+    )
+    await setup_integration(hass, mock_config_entry)
+
+    node = await _browse(hass, "radio")
+    assert node.children == []
+
+    polls = mock_client.async_get_current_info.await_count
+    freezer.tick(SCAN_INTERVAL + timedelta(seconds=1))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert mock_client.async_get_current_info.await_count > polls
+    mock_client.async_get_radio_channels.assert_awaited_once()
+
+
+async def test_a_failed_background_read_of_the_radio_is_tried_again(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_client: AsyncMock,
+    current_info: CurrentInfo,
+    freezer,
+) -> None:
+    """A fault reading the list costs nothing but a later attempt."""
+    mock_client.async_get_current_info.return_value = replace(
+        current_info, position_ms=0
+    )
+    mock_client.async_get_radio_channels.side_effect = DisklavierConnectionError("no")
+    await setup_integration(hass, mock_config_entry)
+    assert mock_config_entry.runtime_data.radio_channels is None
+
+    mock_client.async_get_radio_channels.side_effect = None
+    mock_client.async_get_radio_channels.return_value = [SAMPLER]
+    freezer.tick(SCAN_INTERVAL + timedelta(seconds=1))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert mock_config_entry.runtime_data.radio_channels == [SAMPLER]
+
+
+async def test_a_radio_read_still_in_flight_is_not_started_again(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_client: AsyncMock,
+    current_info: CurrentInfo,
+    freezer,
+) -> None:
+    """The read takes three or four seconds, so the next poll arrives while it runs.
+
+    That poll must not put the question to the piano a second time: one reset of the
+    sequencer is the price of the list, and there is no call to pay it twice.
+    """
+    release = asyncio.Event()
+
+    async def slow_read() -> list[RadioChannel]:
+        await release.wait()
+        return [SAMPLER]
+
+    mock_client.async_get_radio_channels.side_effect = slow_read
+    mock_client.async_get_current_info.return_value = replace(
+        current_info, position_ms=0
+    )
+    # Set up by hand: the shared helper waits for background tasks, and this one is
+    # being held open on purpose.
+    mock_config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    polls = mock_client.async_get_current_info.await_count
+    freezer.tick(SCAN_INTERVAL + timedelta(seconds=1))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert mock_client.async_get_current_info.await_count > polls
+    assert mock_client.async_get_radio_channels.await_count == 1
+
+    release.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert mock_config_entry.runtime_data.radio_channels == [SAMPLER]
+
+
+async def test_the_radio_list_is_read_while_the_radio_itself_plays(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_client: AsyncMock,
+    current_info: CurrentInfo,
+    master_state: MasterState,
+) -> None:
+    """The one thing the read does not disturb is a radio channel already playing."""
+    current, master = on_the_radio(current_info, master_state)
+    mock_client.async_get_current_info.return_value = current
+    mock_client.async_get_master_state.return_value = master
+    mock_client.async_get_radio_channels.return_value = [SAMPLER]
+    await setup_integration(hass, mock_config_entry)
+
+    assert mock_config_entry.runtime_data.radio_channels == [SAMPLER]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        # Asleep: the piano is not to be woken, or poked, for a channel list.
+        {"power_status": PowerStatus.SLEEP, "position_ms": 0},
+        # Playing: the read would stop it.
+        {"playback_status": PlaybackStatus.PLAY},
+        # Paused part-way: the read would rewind it.
+        {"playback_status": PlaybackStatus.PAUSE, "position_ms": 34000},
+    ],
+)
+async def test_the_radio_list_is_not_read_when_it_would_cost_something(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_client: AsyncMock,
+    current_info: CurrentInfo,
+    changes: dict[str, Any],
+) -> None:
+    """The background read waits for a moment when it is free."""
+    mock_client.async_get_current_info.return_value = replace(current_info, **changes)
+    await setup_integration(hass, mock_config_entry)
+
+    mock_client.async_get_radio_channels.assert_not_awaited()
+    assert mock_config_entry.runtime_data.radio_channels is None
 
 
 @pytest.mark.parametrize(
@@ -240,7 +438,6 @@ async def test_browse_radio(
         ("album/built_in_songs/9", "async_get_songs_in_album"),
         ("playlists/playlists", "async_get_playlists"),
         ("playlist/playlists/1", "async_get_playlist_items"),
-        ("radio", "async_get_radio_channels"),
     ],
 )
 async def test_browse_reports_a_failing_library(
@@ -263,6 +460,24 @@ async def test_browse_reports_a_failing_library(
     assert err.value.translation_key == "browse_failed"
 
 
+async def test_browse_radio_reports_a_list_that_will_not_read(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_client: AsyncMock,
+    current_info: CurrentInfo,
+) -> None:
+    """A fault reading the channel list is an error, like any other library's."""
+    coordinator = init_integration.runtime_data
+    coordinator.data = replace(
+        coordinator.data, current=replace(current_info, position_ms=0)
+    )
+    mock_client.async_get_radio_channels.side_effect = DisklavierResponseError("nope")
+
+    with pytest.raises(HomeAssistantError) as err:
+        await _browse(hass, "radio")
+    assert err.value.translation_key == "browse_failed"
+
+
 async def test_every_page_can_search(
     hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
 ) -> None:
@@ -275,6 +490,7 @@ async def test_every_page_can_search(
     mock_client.async_get_playlists.return_value = [
         Playlist(playlist_id=1, title="RR Christmas")
     ]
+    init_integration.runtime_data.radio_channels = [SAMPLER]
 
     for content_id in (
         None,
@@ -539,7 +755,7 @@ async def test_browse_quick_link_recovers_when_its_album_id_is_gone(
 
     def listing(album_id: int, group: SongGroup) -> list[Song]:
         if album_id == 2:
-            raise DisklavierResponseError(
+            raise DisklavierEnvelopeError(
                 "Disklavier command 'get_song_list_in_album' failed: no album",
                 command="get_song_list_in_album",
                 error_info="no album",

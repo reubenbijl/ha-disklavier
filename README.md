@@ -71,7 +71,7 @@ on the piano; the integration only ever reads and sends commands.
 | Entity | Platform | What it does |
 |---|---|---|
 | Disklavier | `media_player` | Play, pause, stop, next, previous, seek, volume, repeat and shuffle, power, search, and the full media browser |
-| Quiet mode | `select` | **Acoustic** or **Quiet** — whether the hammers physically strike the strings |
+| Quiet mode | `select` | **Acoustic** or **Quiet** — whether the hammers physically strike the strings. Reads **Headphone** for as long as headphones are plugged in; that one is the piano's to set, so it is reported but cannot be chosen |
 | Song type | `sensor` | What the loaded song is: **PianoSoft solo**, **PianoSoft Plus**, **PianoSoft PlusAudio**, **MIDI file** or **Audio** — with an `audio_output` attribute saying whether playback uses the speakers. Trigger a receiver on it |
 | Play test chord | `button` | Sounds a chord to confirm the piano is responding. Disabled by default, because pressing it makes a noise |
 
@@ -94,6 +94,20 @@ Every page of the media browser has a **search box** (and voice assistants can u
 search): results come ranked from the piano's own song database, cover every library,
 playlists and radio, and play by exact id. `search/<title>` remains for scripts — it is a
 single fuzzy pick made by the piano itself, sight unseen.
+
+Searching and browsing never interrupt what is playing. That takes some care, because asking
+the piano for its radio channel list does: the firmware stops its sequencer to fetch it, so a
+playing song falls silent and a paused one rewinds. The integration therefore reads the list
+once, in the background, the first time the piano is on with nothing loaded part-way — or
+playing the radio, which the read does not disturb — and keeps it. Until then radio channels
+are left out of search results, and the **Radio** page, rather than end your music to open,
+says that it cannot yet. Reload the integration to pick up a changed channel line-up.
+
+**While the radio plays** the entity is *playing*, its title is the song the channel is on,
+and `media_channel` names the channel. The piano ignores its own transport during radio, so
+the controls are mapped onto what it will do: **pause** and **stop** both end the radio — a
+channel cannot be paused — and choosing anything else to play ends the radio first, then
+plays it. **Next** and **previous** have nothing to map onto, and say so.
 
 `search/` is a fuzzy title match run on the piano itself, which makes it the practical choice
 for voice assistants and scripts — you do not need to know any ids:
@@ -187,8 +201,14 @@ These are properties of the piano's firmware, not of the integration:
   so add a delay before sending commands after `turn_on`.
 - **Stop and pause look the same.** The firmware has no stop state — stopping reports as
   paused at position zero, which appears as *idle*.
-- **Radio swallows transport commands.** While a radio channel is playing, play and pause
-  may appear to succeed without doing anything.
+- **Radio is a mode that takes the piano over.** While a channel plays, the firmware answers
+  play, pause, stop, next and every request to play something else with success and ignores
+  them. The integration works around each of those (see above), but a paused position does
+  not survive a visit to the radio: afterwards the piano is back on its previous song, at
+  the start.
+- **A state the piano reports that nobody has seen before shows as *unknown*.** Not as the
+  nearest guess. `aiodisklavier` logs a warning naming the value when that happens; please
+  report it.
 - **Repeat and shuffle are one setting on the piano.** Home Assistant shows them as two
   controls; turning shuffle on implies repeat, because the piano cannot shuffle without it.
 - **Recording is not exposed.** The API supports it, but it is untested here and not wired up.
@@ -205,7 +225,16 @@ still right, and that you can load `http://<piano-ip>/api/1.0/current_info` in a
 Note that the piano answers HTTP even in standby, so "unavailable" means a network problem
 rather than the piano being asleep — an asleep piano shows as *off*.
 
-**Commands do nothing.** Check whether the piano is waking (see above), or playing radio.
+**Commands do nothing.** Check whether the piano is waking (see above). If nothing will play
+at all — from Home Assistant, the phone app or the panel — and a loaded song shows a length
+of zero, the piano's sequencer has wedged, which it occasionally does; only restarting the
+piano clears it. `aiodisklavier`'s
+[protocol reference](https://github.com/reubenbijl/aiodisklavier/blob/main/docs/enspire-api.md)
+describes it under §7.14.
+
+**The Radio page will not open.** It says the channel list has not been read yet. Reading it
+stops whatever is playing, so the integration waits for a moment when nothing would be lost.
+Stop playback and open Radio again; the list is kept from then on.
 
 **The media browser shows an error.** That means a library failed to list, rather than being
 empty — an empty library shows as an empty folder. Check the piano is still reachable.

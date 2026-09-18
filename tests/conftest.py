@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Generator
+from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -53,10 +54,41 @@ def share_db(*albums: tuple[int, str]) -> SongDatabase:
 
 
 async def setup_integration(hass: HomeAssistant, entry: MockConfigEntry) -> None:
-    """Add a config entry and set it up, the way Home Assistant loads one."""
+    """Add a config entry and set it up, the way Home Assistant loads one.
+
+    Background tasks are waited for too: the coordinator reads the radio channel list in
+    one, the first time doing so is harmless, and a test should see the result of that
+    rather than race it.
+    """
     entry.add_to_hass(hass)
     await hass.config_entries.async_setup(entry.entry_id)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+
+def on_the_radio(
+    current: CurrentInfo, master: MasterState
+) -> tuple[CurrentInfo, MasterState]:
+    """Return the two state reads as the piano gives them while a radio channel plays.
+
+    Captured from hardware: the open API says "radio" and nothing else -- no title, no
+    position, a length of zero -- and the programme is only in the extended state.
+    """
+    return (
+        replace(
+            current,
+            playback_status=PlaybackStatus.RADIO,
+            position_ms=0,
+            duration_ms=0,
+            song_title=None,
+            song_artist=None,
+            song_folder=None,
+        ),
+        replace(
+            master,
+            radio_channel="Complimentary Channel Sampler",
+            radio_title="Lullaby of Birdland",
+        ),
+    )
 
 
 @pytest.fixture(autouse=True)

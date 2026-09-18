@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Coroutine
 from datetime import datetime
 from typing import Any
 
 from aiodisklavier import (
     VOLUME_MAX,
     Album,
+    DisklavierEnvelopeError,
     DisklavierError,
-    DisklavierResponseError,
     Genre,
     GenreSelect,
+    PlaybackStatus,
     Playlist,
     PlaylistGroup,
     PowerStatus,
@@ -35,7 +37,7 @@ from homeassistant.components.media_player import (
     SearchMediaQuery,
 )
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.event import async_call_later
 
@@ -56,7 +58,11 @@ from .const import (
     LIBRARY_SETTLE_SECONDS,
     MS_PER_SECOND,
 )
-from .coordinator import DisklavierConfigEntry, DisklavierCoordinator
+from .coordinator import (
+    DisklavierConfigEntry,
+    DisklavierCoordinator,
+    radio_list_is_free,
+)
 from .entity import DisklavierEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -240,7 +246,6 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
 
     _attr_name = None
     _attr_device_class = MediaPlayerDeviceClass.SPEAKER
-    _attr_media_content_type = MediaType.MUSIC
     _attr_supported_features = (
         MediaPlayerEntityFeature.PLAY
         | MediaPlayerEntityFeature.PAUSE
@@ -364,11 +369,24 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         await super().async_will_remove_from_hass()
 
     @property
-    def state(self) -> MediaPlayerState:
+    def _radio(self) -> bool:
+        """Whether a DisklavierRadio channel was playing as of the last poll.
+
+        Radio is a mode that takes the piano over: while it is on the firmware answers
+        play, pause, stop, next and every request to play something else with HTTP 200
+        and ignores them. So each of those is handled here rather than sent into the
+        void.
+        """
+        return self.coordinator.data.current.is_radio
+
+    @property
+    def state(self) -> MediaPlayerState | None:
         """Return the player state.
 
         ``wakeup`` is reported as off: the piano is still ~12 seconds from accepting
-        commands, so presenting it as on would invite failures.
+        commands, so presenting it as on would invite failures. The radio counts as
+        playing, which is what it is doing. A status aiodisklavier has no name for is
+        reported as unknown rather than dressed as paused.
         """
         if self._optimistic_state is not None:
             return self._optimistic_state
@@ -377,10 +395,15 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
             return MediaPlayerState.OFF
         if current.is_playing:
             return MediaPlayerState.PLAYING
+        # A second or two while the sequencer loads a song, which is what buffering is.
+        if current.playback_status is PlaybackStatus.LOAD:
+            return MediaPlayerState.BUFFERING
         # The piano has no stop state; a zero position is the only way to tell that
         # 'stop' was used rather than 'pause'.
         if current.is_stopped:
             return MediaPlayerState.IDLE
+        if current.playback_status is None:
+            return None
         return MediaPlayerState.PAUSED
 
     @property
@@ -390,8 +413,20 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         return None if volume is None else volume / VOLUME_MAX
 
     @property
+    def media_content_type(self) -> MediaType:
+        """Return what kind of thing is playing: a radio channel, or a song."""
+        return MediaType.CHANNEL if self._radio else MediaType.MUSIC
+
+    @property
     def media_title(self) -> str | None:
-        """Return the current song title."""
+        """Return the current song title.
+
+        During radio the open API reports no title at all; the song the channel is on
+        is only in the piano's extended state.
+        """
+        if self._radio:
+            master = self.coordinator.data.master
+            return None if master is None else master.radio_title
         return self.coordinator.data.current.song_title
 
     @property
@@ -405,16 +440,25 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         return self.coordinator.data.current.song_folder
 
     @property
+    def media_channel(self) -> str | None:
+        """Return the radio channel that is playing, if one is."""
+        master = self.coordinator.data.master
+        return None if master is None or not self._radio else master.radio_channel
+
+    @property
     def media_duration(self) -> int | None:
-        """Return the song length in seconds."""
+        """Return the song length in seconds.
+
+        Unknown during radio, where the piano reports a length of zero.
+        """
         duration = self.coordinator.data.current.duration_seconds
-        return None if duration is None else int(duration)
+        return None if duration is None or self._radio else int(duration)
 
     @property
     def media_position(self) -> int | None:
-        """Return the playback position in seconds."""
+        """Return the playback position in seconds. Unknown during radio, likewise."""
         position = self.coordinator.data.current.position_seconds
-        return None if position is None else int(position)
+        return None if position is None or self._radio else int(position)
 
     @property
     def media_position_updated_at(self) -> datetime:
@@ -442,26 +486,57 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
     # ------------------------------------------------------------------
 
     async def async_media_play(self) -> None:
-        """Start playback."""
+        """Start playback. The radio is playing already, so there it is left alone."""
+        if self._radio:
+            return
         await self._async_call(self.coordinator.client.async_play())
         self._set_optimistic_state(MediaPlayerState.PLAYING)
 
     async def async_media_pause(self) -> None:
-        """Pause playback."""
+        """Pause playback.
+
+        A radio channel cannot be paused, only ended -- and someone pressing pause
+        wants quiet, so that is what they get. The piano is then back on the song it
+        had loaded before the radio, stopped.
+        """
+        if self._radio:
+            await self._async_stop_radio()
+            return
         await self._async_call(self.coordinator.client.async_pause())
         self._set_optimistic_state(MediaPlayerState.PAUSED)
 
     async def async_media_stop(self) -> None:
-        """Stop playback and rewind."""
+        """Stop playback and rewind, or end the radio."""
+        if self._radio:
+            await self._async_stop_radio()
+            return
         await self._async_call(self.coordinator.client.async_stop())
         self._set_optimistic_state(MediaPlayerState.IDLE)
 
+    async def _async_stop_radio(self) -> None:
+        """End the radio, returning once the piano will take another command.
+
+        aiodisklavier waits out the second or so after the piano's reply during which
+        it is still deaf, so whatever is sent next is not lost.
+        """
+        await self._async_call(self.coordinator.client.async_stop_radio())
+        self._set_optimistic_state(MediaPlayerState.IDLE)
+
+    def _refuse_during_radio(self) -> None:
+        """Say why, for a command the radio would silently swallow."""
+        if self._radio:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="radio_active"
+            )
+
     async def async_media_next_track(self) -> None:
         """Skip to the next song."""
+        self._refuse_during_radio()
         await self._async_call(self.coordinator.client.async_next_song())
 
     async def async_media_previous_track(self) -> None:
         """Go back to the previous song."""
+        self._refuse_during_radio()
         await self._async_call(self.coordinator.client.async_previous_song())
 
     async def async_media_seek(self, position: float) -> None:
@@ -531,16 +606,12 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         client = self.coordinator.client
         kind, _, rest = media_id.partition("/")
 
+        # The id is parsed in full before anything is sent, so that a bad one fails
+        # without having first ended the radio on the way to not playing it.
+        play: Coroutine[Any, Any, None]
         try:
-            if kind == CONTENT_SEARCH:
-                await self._async_call(client.async_play_search(rest))
-                return
-            if kind == CONTENT_RANDOM:
-                await self._async_call(
-                    client.async_play_genre(Genre(rest), select=GenreSelect.RANDOM)
-                )
-                return
             if kind == CONTENT_RADIO:
+                # One channel replaces another directly: nothing to end first.
                 await self._async_call(client.async_play_radio(int(rest)))
                 return
             if kind == CONTENT_QUICK_LINK:
@@ -548,23 +619,21 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
                 return
 
             group_name, _, item_id = rest.partition("/")
-            if kind == CONTENT_SONG:
-                await self._async_call(
-                    client.async_play_song(int(item_id), SongGroup(group_name))
-                )
+            if kind == CONTENT_SEARCH:
+                play = client.async_play_search(rest)
+            elif kind == CONTENT_RANDOM:
+                play = client.async_play_genre(Genre(rest), select=GenreSelect.RANDOM)
+            elif kind == CONTENT_SONG:
+                play = client.async_play_song(int(item_id), SongGroup(group_name))
             elif kind == CONTENT_ALBUM:
-                await self._async_call(
-                    client.async_play_album(int(item_id), SongGroup(group_name))
-                )
+                play = client.async_play_album(int(item_id), SongGroup(group_name))
             elif kind == CONTENT_PLAYLIST:
-                await self._async_call(
-                    client.async_play_playlist(int(item_id), PlaylistGroup(group_name))
+                play = client.async_play_playlist(
+                    int(item_id), PlaylistGroup(group_name)
                 )
             elif kind == CONTENT_PLAYLIST_ITEM:
-                await self._async_call(
-                    client.async_play_playlist_item(
-                        int(item_id), PlaylistGroup(group_name)
-                    )
+                play = client.async_play_playlist_item(
+                    int(item_id), PlaylistGroup(group_name)
                 )
             else:
                 raise HomeAssistantError(
@@ -578,6 +647,23 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
                 translation_key="unsupported_media_id",
                 translation_placeholders={"media_id": media_id},
             ) from err
+
+        await self._async_play_over_radio(play)
+
+    async def _async_play_over_radio(self, play: Coroutine[Any, Any, None]) -> None:
+        """Play something, ending the radio first if it is on.
+
+        While a channel is playing the piano accepts a request to play anything else and
+        ignores it, so without this the media browser would appear to do nothing.
+        """
+        if self._radio:
+            try:
+                await self._async_call(self.coordinator.client.async_stop_radio())
+            except HomeAssistantError:
+                # Never awaited now, so close it rather than leave it to the collector.
+                play.close()
+                raise
+        await self._async_call(play)
 
     # ------------------------------------------------------------------
     # Browsing
@@ -844,9 +930,10 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
             album, seen = remembered
             try:
                 songs = await client.async_get_songs_in_album(album.album_id, group)
-            except DisklavierResponseError:
+            except DisklavierEnvelopeError:
                 # An id the piano no longer has raises "no album" rather than listing
-                # nothing: the folder has moved, so look it up again below.
+                # nothing: the folder has moved, so look it up again below. Only that
+                # considered "no", though -- a garbled reply is a fault, not a hint.
                 pass
             else:
                 if frozenset(songs) == seen:
@@ -907,7 +994,7 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
                 translation_placeholders={"folder": folder},
             )
         album, _ = resolved
-        await self._async_call(
+        await self._async_play_over_radio(
             self.coordinator.client.async_play_album(
                 album.album_id, SongGroup.PC_SHARING_FOLDER
             )
@@ -985,7 +1072,14 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         to play "the song …", then plays whatever comes first.
         """
         try:
-            results = await self.coordinator.client.async_search(query.search_query)
+            # Radio channels are searched only once the coordinator holds the list,
+            # which makes the library's copy of it warm too. Asking for them any sooner
+            # would have aiodisklavier read the list from the piano, and that read
+            # stops whatever is playing: a search must never be what ends the music.
+            results = await self.coordinator.client.async_search(
+                query.search_query,
+                include_radio=self.coordinator.radio_channels is not None,
+            )
         except DisklavierError as err:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
@@ -1024,9 +1118,21 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
     async def _browse_radio(self) -> BrowseMedia:
         """List the radio channels.
 
-        Radio is unavailable in some regions, where this comes back as an empty list.
+        From the coordinator's copy, which it reads in the background the first time
+        that is harmless. Reading the list from the piano stops whatever is playing, so
+        if it has not been read yet it is read here only when there is nothing to lose;
+        otherwise the page says why it cannot open, rather than ending the music of
+        someone who was only looking. Radio is unavailable in some regions, where the
+        list is empty.
         """
-        channels = await self.coordinator.client.async_get_radio_channels()
+        channels = self.coordinator.radio_channels
+        if channels is None:
+            if not radio_list_is_free(self.coordinator.data.current):
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="radio_list_would_interrupt",
+                )
+            channels = await self.coordinator.async_read_radio_channels()
 
         return _page(
             _RADIO_TITLE,

@@ -50,7 +50,8 @@
         "name": "Quiet mode",
         "state": {
           "acoustic": "Acoustic",
-          "quiet": "Quiet"
+          "quiet": "Quiet",
+          "headphone": "Headphone"
         }
       }
     },
@@ -79,6 +80,15 @@
     },
     "quick_link_not_found": {
       "message": "No \"{folder}\" folder found in PC Sharing Folder. Sync it to the share and reindex, then try again."
+    },
+    "headphone_not_selectable": {
+      "message": "Headphone mode is set by the piano for as long as headphones are plugged in. It cannot be chosen from here; unplug them to return to acoustic or quiet."
+    },
+    "radio_active": {
+      "message": "DisklavierRadio is playing, and the piano ignores this command while it is. Stop the radio first."
+    },
+    "radio_list_would_interrupt": {
+      "message": "The radio channels have not been read from the piano yet, and reading them stops whatever is playing. Stop playback and open Radio again; after that the list is kept."
     }
   }
 }
