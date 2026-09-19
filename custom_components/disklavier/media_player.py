@@ -535,17 +535,25 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         """Start playback. The radio is playing already, so there it is left alone.
 
         A held song is let go at once and plays from the start: whatever it was
-        waiting for is ready. One the piano is still loading needs nothing sent, since
-        it starts by itself.
+        waiting for is ready. It goes straight from buffering to playing, with no
+        glimpse of the stopped song in between. One the piano is still loading needs
+        nothing sent, since it starts by itself.
         """
         hold = self._hold
-        if hold is not None:
+        if hold is not None and not hold.stopped:
             self._cancel_hold()
-            if not hold.stopped:
-                return
+            return
+        # No state written yet: the play below writes it.
+        self._drop_hold()
         if self._radio:
             return
-        await self._async_call(self.coordinator.client.async_play())
+        try:
+            await self._async_call(self.coordinator.client.async_play())
+        except HomeAssistantError:
+            if hold is not None:
+                # The hold is over even though the song is not playing.
+                self.async_write_ha_state()
+            raise
         self._set_optimistic_state(MediaPlayerState.PLAYING)
 
     async def async_media_pause(self) -> None:

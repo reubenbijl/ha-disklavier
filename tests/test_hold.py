@@ -33,8 +33,9 @@ from homeassistant.const import (
     STATE_BUFFERING,
     STATE_PLAYING,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
@@ -164,6 +165,55 @@ async def test_play_lets_a_held_song_go_at_once(
 
     await _pass(hass, freezer, 30)
     mock_client.async_play.assert_awaited_once()
+
+
+async def test_play_goes_straight_from_waiting_to_playing(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_client: AsyncMock,
+    current_info: CurrentInfo,
+) -> None:
+    """No glimpse of the stopped song between the hold and the play.
+
+    A state written in between would read idle, and set off anything that triggers
+    on the piano stopping.
+    """
+    await _piano_reports(hass, init_integration, mock_client, _playing(current_info))
+    await _hold(hass)
+    # Stopped by the hold, the piano reports its song paused at the start.
+    await _piano_reports(
+        hass, init_integration, mock_client, replace(current_info, position_ms=0)
+    )
+    assert hass.states.get(ENTITY).state == STATE_BUFFERING
+    states: list[str] = []
+
+    @callback
+    def record(event: Event[EventStateChangedData]) -> None:
+        if (new_state := event.data["new_state"]) is not None:
+            states.append(new_state.state)
+
+    async_track_state_change_event(hass, [ENTITY], record)
+    await _command(hass, SERVICE_MEDIA_PLAY)
+    await hass.async_block_till_done()
+
+    assert states == [STATE_PLAYING]
+
+
+async def test_a_refused_play_still_ends_the_hold(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_client: AsyncMock,
+    current_info: CurrentInfo,
+) -> None:
+    """The caller hears of it, and the player no longer claims the song is waiting."""
+    await _piano_reports(hass, init_integration, mock_client, _playing(current_info))
+    await _hold(hass)
+    mock_client.async_play.side_effect = DisklavierCommandError("busy")
+
+    with pytest.raises(HomeAssistantError):
+        await _command(hass, SERVICE_MEDIA_PLAY)
+
+    assert "hold_until" not in hass.states.get(ENTITY).attributes
 
 
 @pytest.mark.parametrize(
