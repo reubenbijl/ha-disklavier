@@ -89,6 +89,25 @@
     },
     "radio_list_would_interrupt": {
       "message": "The radio channels have not been read from the piano yet, and reading them stops whatever is playing. Stop playback and open Radio again; after that the list is kept."
+    },
+    "hold_needs_a_song": {
+      "message": "Only a song that is starting or playing can be held."
+    }
+  },
+  "services": {
+    "hold_playback": {
+      "name": "Hold playback",
+      "description": "Holds the song that is starting or playing until something else is ready for it, such as a receiver that is still waking up, then plays it from the start. Meanwhile the piano shows as buffering. Play releases the hold at once; pause, stop or another song cancel it.",
+      "fields": {
+        "duration": {
+          "name": "Duration",
+          "description": "The longest the song waits. It plays from the start when this runs out, unless play is pressed sooner."
+        },
+        "message": {
+          "name": "Message",
+          "description": "Shown under the song title while it waits, for example \"Waiting for the receiver\"."
+        }
+      }
     }
   }
 }

@@ -11,10 +11,11 @@
 rules:
   # ------------------------------------------------------------------ Bronze
   action-setup:
-    status: exempt
+    status: done
     comment: |
-      The integration registers no service actions. Everything is exposed through entity
-      platforms, so there is nothing to register in async_setup.
+      The one action, hold_playback, is registered in async_setup as an entity action of
+      the media player platform, so it exists (and validates its target) before any piano
+      is set up.
   appropriate-polling:
     status: done
     comment: |
@@ -50,8 +51,8 @@ rules:
       aiodisklavier is MIT, developed in the open, built and published to PyPI from a
       tagged GitHub release via trusted publishing.
   docs-actions:
-    status: exempt
-    comment: No service actions to document.
+    status: done
+    comment: hold_playback is documented in the README, with an example automation.
   docs-high-level-description:
     status: done
     comment: README. The home-assistant.io page is a core requirement, not a HACS one.

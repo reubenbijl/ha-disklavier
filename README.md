@@ -20,6 +20,9 @@ Verified against firmware **5.24.00** on a Disklavier ENSPIRE PRO grand.
   library's folder structure intact: the built-in songs, My Songs, your recordings,
   downloaded songs, the PC sharing folder, playlists, the demo playlist, and radio.
 - **See what it is playing** on a dashboard, with title, artist, position and duration.
+- **Hold a song until the speakers are ready** — a receiver that takes twenty seconds to
+  wake can have the piano wait for it, so a song with audio starts from the top with sound
+  instead of into silence.
 
 ## Supported devices
 
@@ -70,7 +73,7 @@ on the piano; the integration only ever reads and sends commands.
 
 | Entity | Platform | What it does |
 |---|---|---|
-| Disklavier | `media_player` | Play, pause, stop, next, previous, seek, volume, repeat and shuffle, power, search, and the full media browser |
+| Disklavier | `media_player` | Play, pause, stop, next, previous, seek, volume, repeat and shuffle, power, search, and the full media browser. Its `disklavier.hold_playback` action holds a song until the speakers are ready ([below](#holding-a-song-until-the-speakers-are-ready)) |
 | Quiet mode | `select` | **Acoustic** or **Quiet** — whether the hammers physically strike the strings. Reads **Headphone** for as long as headphones are plugged in; that one is the piano's to set, so it is reported but cannot be chosen |
 | Song type | `sensor` | What the loaded song is: **PianoSoft solo**, **PianoSoft Plus**, **PianoSoft PlusAudio**, **MIDI file** or **Audio** — with an `audio_output` attribute saying whether playback uses the speakers. Trigger a receiver on it |
 | Play test chord | `button` | Sounds a chord to confirm the piano is responding. Disabled by default, because pressing it makes a noise |
@@ -180,6 +183,72 @@ Silence the room after bedtime without stopping playback:
           entity_id: select.disklavier_pro_quiet_mode
         data:
           option: quiet
+```
+
+## Holding a song until the speakers are ready
+
+A PianoSoft song with audio needs its speakers from the first note, and a receiver woken by
+the song can take twenty seconds before it plays anything. The `disklavier.hold_playback`
+action lets whatever looks after the speakers ask the piano to wait:
+
+- The song is stopped, which rewinds it, and the player shows **buffering**, with your
+  message as the line under the song title. In the media browser's player bar that is a
+  spinner where the controls were.
+- It plays from the start when the duration runs out, or at once when
+  `media_player.media_play` is called. That is how an automation says it is ready.
+- Pause, stop, skipping, seeking, another song or turning the piano off cancel the hold.
+- A song the piano is still loading is stopped the moment it starts, so the hold can be
+  placed as soon as the song begins buffering.
+
+While a song is held, the player carries a `hold_until` attribute: when it will play by
+itself. A hold does not survive a restart of Home Assistant; the song is then left stopped
+at its start.
+
+| Field | | |
+|---|---|---|
+| `duration` | required | The longest the song waits, from 1 second to 10 minutes |
+| `message` | optional | Shown under the song title while it waits |
+
+Wake a receiver when a song with audio starts, and hold the song until the receiver can
+play it:
+
+```yaml
+automation:
+  - alias: Piano waits for the receiver
+    mode: single
+    # The play at the end sets the trigger off again while this run is finishing.
+    max_exceeded: silent
+    triggers:
+      - trigger: state
+        entity_id: media_player.disklavier_pro
+        to: [buffering, playing]
+    conditions:
+      - condition: state
+        entity_id: sensor.disklavier_pro_song_type
+        state: plus_audio
+      - condition: state
+        entity_id: media_player.receiver
+        state: "off"
+    actions:
+      - action: disklavier.hold_playback
+        target:
+          entity_id: media_player.disklavier_pro
+        data:
+          duration: "00:01:00"
+          message: Waiting for the receiver
+      - action: media_player.turn_on
+        target:
+          entity_id: media_player.receiver
+      - action: media_player.select_source
+        target:
+          entity_id: media_player.receiver
+        data:
+          source: Piano
+      # However long this receiver takes to make a sound from standby.
+      - delay: "00:00:20"
+      - action: media_player.media_play
+        target:
+          entity_id: media_player.disklavier_pro
 ```
 
 ## How data updates

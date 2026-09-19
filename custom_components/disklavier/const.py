@@ -29,6 +29,23 @@ LIBRARY_SETTLE_SECONDS: Final = 5
 #: Milliseconds per second, for converting the piano's positions to Home Assistant's seconds.
 MS_PER_SECOND: Final = 1000
 
+#: The hold_playback action, its fields, and the attribute a held song carries.
+SERVICE_HOLD_PLAYBACK: Final = "hold_playback"
+ATTR_DURATION: Final = "duration"
+ATTR_MESSAGE: Final = "message"
+ATTR_HOLD_UNTIL: Final = "hold_until"
+
+#: The longest a song can be held.
+HOLD_MAX: Final = timedelta(minutes=10)
+
+#: How often the piano is read while a held song is still loading, so that it is stopped
+#: within half a second of starting rather than up to a poll interval later.
+HOLD_WATCH_INTERVAL: Final = timedelta(seconds=0.5)
+
+#: How long that closer watch lasts. Loading takes a few seconds; one still loading after
+#: this is left to the regular poll, which stops it just the same, only later.
+HOLD_WATCH_LIMIT: Final = timedelta(seconds=30)
+
 # media_content_id prefixes used by browse_media and play_media.
 CONTENT_SONG: Final = "song"
 CONTENT_ALBUM: Final = "album"

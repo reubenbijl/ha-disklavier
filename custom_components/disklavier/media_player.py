@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Coroutine
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from functools import partial
 from typing import Any
 
 from aiodisklavier import (
@@ -39,9 +41,11 @@ from homeassistant.components.media_player import (
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
+from homeassistant.util import dt as dt_util
 
 from .const import (
+    ATTR_HOLD_UNTIL,
     CONTENT_ALBUM,
     CONTENT_ALBUM_DIR,
     CONTENT_LIBRARY,
@@ -55,6 +59,8 @@ from .const import (
     CONTENT_SEARCH,
     CONTENT_SONG,
     DOMAIN,
+    HOLD_WATCH_INTERVAL,
+    HOLD_WATCH_LIMIT,
     LIBRARY_SETTLE_SECONDS,
     MS_PER_SECOND,
 )
@@ -232,6 +238,22 @@ def _channel(channel: RadioChannel) -> BrowseMedia:
     )
 
 
+@dataclass(slots=True)
+class _Hold:
+    """A song held back by ``hold_playback`` until something else is ready for it."""
+
+    #: When the hold lets go by itself and the song plays.
+    until: datetime
+    #: Shown as the line under the song title while the song waits.
+    message: str | None
+    #: The song held, as its title and folder. A different song in its place ends the
+    #: hold: someone chose one at the piano.
+    song: tuple[str | None, str | None]
+    #: Whether the song has been stopped, which rewinds it. Not yet while the piano is
+    #: still loading it.
+    stopped: bool = False
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: DisklavierConfigEntry,
@@ -283,6 +305,11 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         self._position_seen: tuple[float | None, bool] | None = None
         self._position_updated_at: datetime = coordinator.data.fetched_at
         self._track_position()
+        #: The song ``hold_playback`` is holding back, if any. See ``async_hold_playback``.
+        self._hold: _Hold | None = None
+        self._cancel_hold_release: CALLBACK_TYPE | None = None
+        self._cancel_hold_watch: CALLBACK_TYPE | None = None
+        self._hold_watch_until: datetime | None = None
 
     # ------------------------------------------------------------------
     # State
@@ -311,6 +338,7 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
             self._optimistic_state = None
         self._track_position()
         self._watch_library()
+        self._follow_hold()
         super()._handle_coordinator_update()
 
     @callback
@@ -362,10 +390,11 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
                 _LOGGER.debug("Could not refresh quick link %s: %s", folder, err)
 
     async def async_will_remove_from_hass(self) -> None:
-        """Drop any pending Quick Links refresh."""
+        """Drop any pending Quick Links refresh, and any hold with its timers."""
         if self._cancel_warm_up is not None:
             self._cancel_warm_up()
             self._cancel_warm_up = None
+        self._drop_hold()
         await super().async_will_remove_from_hass()
 
     @property
@@ -386,8 +415,12 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         ``wakeup`` is reported as off: the piano is still ~12 seconds from accepting
         commands, so presenting it as on would invite failures. The radio counts as
         playing, which is what it is doing. A status aiodisklavier has no name for is
-        reported as unknown rather than dressed as paused.
+        reported as unknown rather than dressed as paused. A song held by
+        ``hold_playback`` is buffering: it is waiting to play, and Home Assistant's
+        media views show a spinner for exactly that.
         """
+        if self._hold is not None:
+            return MediaPlayerState.BUFFERING
         if self._optimistic_state is not None:
             return self._optimistic_state
         current = self.coordinator.data.current
@@ -431,7 +464,13 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
 
     @property
     def media_artist(self) -> str | None:
-        """Return the current song's artist."""
+        """Return the current song's artist, or why a held song is waiting.
+
+        Home Assistant's media views show the artist as the line under the song title,
+        which is where someone who has just pressed play looks.
+        """
+        if self._hold is not None and self._hold.message:
+            return self._hold.message
         return self.coordinator.data.current.song_artist
 
     @property
@@ -466,6 +505,13 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         return self._position_updated_at
 
     @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return when a held song will play, for as long as one is held."""
+        if self._hold is None:
+            return None
+        return {ATTR_HOLD_UNTIL: self._hold.until}
+
+    @property
     def repeat(self) -> RepeatMode | None:
         """Return the repeat mode."""
         master = self.coordinator.data.master
@@ -486,7 +532,17 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
     # ------------------------------------------------------------------
 
     async def async_media_play(self) -> None:
-        """Start playback. The radio is playing already, so there it is left alone."""
+        """Start playback. The radio is playing already, so there it is left alone.
+
+        A held song is let go at once and plays from the start: whatever it was
+        waiting for is ready. One the piano is still loading needs nothing sent, since
+        it starts by itself.
+        """
+        hold = self._hold
+        if hold is not None:
+            self._cancel_hold()
+            if not hold.stopped:
+                return
         if self._radio:
             return
         await self._async_call(self.coordinator.client.async_play())
@@ -497,8 +553,9 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
 
         A radio channel cannot be paused, only ended -- and someone pressing pause
         wants quiet, so that is what they get. The piano is then back on the song it
-        had loaded before the radio, stopped.
+        had loaded before the radio, stopped. Pausing a held song ends the hold.
         """
+        self._cancel_hold()
         if self._radio:
             await self._async_stop_radio()
             return
@@ -506,7 +563,8 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         self._set_optimistic_state(MediaPlayerState.PAUSED)
 
     async def async_media_stop(self) -> None:
-        """Stop playback and rewind, or end the radio."""
+        """Stop playback and rewind, or end the radio. Ends any hold."""
+        self._cancel_hold()
         if self._radio:
             await self._async_stop_radio()
             return
@@ -530,17 +588,23 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
             )
 
     async def async_media_next_track(self) -> None:
-        """Skip to the next song."""
+        """Skip to the next song, ending any hold."""
         self._refuse_during_radio()
+        self._cancel_hold()
         await self._async_call(self.coordinator.client.async_next_song())
 
     async def async_media_previous_track(self) -> None:
-        """Go back to the previous song."""
+        """Go back to the previous song, ending any hold."""
         self._refuse_during_radio()
+        self._cancel_hold()
         await self._async_call(self.coordinator.client.async_previous_song())
 
     async def async_media_seek(self, position: float) -> None:
-        """Seek to a position, in seconds."""
+        """Seek to a position, in seconds.
+
+        A held song was due to play from the start, so seeking it ends the hold.
+        """
+        self._cancel_hold()
         await self._async_call(
             self.coordinator.client.async_seek(int(position * MS_PER_SECOND))
         )
@@ -564,7 +628,8 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         await self._async_call(self.coordinator.client.async_turn_on())
 
     async def async_turn_off(self) -> None:
-        """Send the piano to standby."""
+        """Send the piano to standby, ending any hold."""
+        self._cancel_hold()
         await self._async_call(self.coordinator.client.async_turn_off())
 
     async def async_set_repeat(self, repeat: RepeatMode) -> None:
@@ -582,6 +647,173 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
                 _to_disklavier_repeat(self.repeat or RepeatMode.OFF, shuffle)
             )
         )
+
+    # ------------------------------------------------------------------
+    # Holding a song
+    # ------------------------------------------------------------------
+
+    async def async_hold_playback(
+        self, duration: timedelta, message: str | None = None
+    ) -> None:
+        """Hold the song that is starting or playing until something else is ready.
+
+        For whatever stands between the piano and its listener -- a receiver that takes
+        twenty seconds to wake, say -- so that a song with audio does not start to
+        silent speakers. The song is stopped, which rewinds it, and plays from the
+        start when ``duration`` has passed, or at once if play is pressed sooner.
+        Pause, stop, skipping, seeking, another song or turning the piano off end the
+        hold instead. A song the piano is still loading is stopped the moment it
+        starts, the piano being read every half second until then. Holding a held song
+        again restarts its countdown and replaces its message.
+        """
+        self._refuse_during_radio()
+        hold = self._hold
+        if hold is None:
+            if self.state not in (MediaPlayerState.PLAYING, MediaPlayerState.BUFFERING):
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN, translation_key="hold_needs_a_song"
+                )
+            hold = self._hold = _Hold(
+                until=dt_util.utcnow() + duration,
+                message=message,
+                song=self._song_identity(),
+            )
+        else:
+            hold.until = dt_util.utcnow() + duration
+            hold.message = message
+        if self._cancel_hold_release is not None:
+            self._cancel_hold_release()
+        self._cancel_hold_release = async_call_later(
+            self.hass, duration, partial(self._async_release_hold, hold)
+        )
+        if not hold.stopped:
+            current = self.coordinator.data.current
+            if current.is_playing or self._optimistic_state is MediaPlayerState.PLAYING:
+                try:
+                    await self._async_stop_held_song(hold)
+                except HomeAssistantError:
+                    self._drop_hold()
+                    self.async_write_ha_state()
+                    raise
+            else:
+                self._watch_for_start()
+        self.async_write_ha_state()
+
+    def _song_identity(self) -> tuple[str | None, str | None]:
+        """Return enough of the loaded song to tell when another takes its place."""
+        current = self.coordinator.data.current
+        return (current.song_title, current.song_folder)
+
+    async def _async_stop_held_song(self, hold: _Hold) -> None:
+        """Stop the held song, which rewinds it ready to play from the start."""
+        hold.stopped = True
+        self._stop_watching()
+        await self._async_call(self.coordinator.client.async_stop())
+
+    @callback
+    def _follow_hold(self) -> None:
+        """Keep a hold with its song, and stop that song the moment it starts.
+
+        The hold ends if the piano goes to sleep, a radio channel starts, or a different
+        song is loaded, as when someone chooses one at the piano. The state written after
+        this poll is then the piano's own again.
+        """
+        hold = self._hold
+        if hold is None:
+            return
+        current = self.coordinator.data.current
+        if (
+            current.power_status in (PowerStatus.SLEEP, PowerStatus.WAKEUP)
+            or self._radio
+            or self._song_identity() != hold.song
+        ):
+            self._drop_hold()
+            return
+        if not hold.stopped and current.is_playing:
+            # Marked now, so that a poll landing before the stop cannot send another.
+            hold.stopped = True
+            self.coordinator.config_entry.async_create_task(
+                self.hass,
+                self._async_stop_started_song(hold),
+                "Stop a held Disklavier song",
+            )
+
+    async def _async_stop_started_song(self, hold: _Hold) -> None:
+        """Stop a held song that a poll has just seen start.
+
+        No caller is waiting to hear of a failure, so it is logged, and the song is let
+        play rather than shown as held.
+        """
+        try:
+            await self._async_stop_held_song(hold)
+        except HomeAssistantError as err:
+            _LOGGER.warning("Could not stop the held song, so it plays now: %s", err)
+            if self._hold is hold:
+                self._drop_hold()
+                self.async_write_ha_state()
+
+    @callback
+    def _watch_for_start(self) -> None:
+        """Read the piano every half second until the song it is loading starts."""
+        self._hold_watch_until = dt_util.utcnow() + HOLD_WATCH_LIMIT
+        if self._cancel_hold_watch is None:
+            self._cancel_hold_watch = async_track_time_interval(
+                self.hass, self._async_watch_tick, HOLD_WATCH_INTERVAL
+            )
+
+    async def _async_watch_tick(self, now: datetime) -> None:
+        """Take one closer look at a loading song, or stop looking once it is too long."""
+        if self._hold_watch_until is None or now >= self._hold_watch_until:
+            self._stop_watching()
+            return
+        await self.coordinator.async_refresh()
+
+    @callback
+    def _stop_watching(self) -> None:
+        """End the closer watch, leaving the song to the regular poll."""
+        if self._cancel_hold_watch is not None:
+            self._cancel_hold_watch()
+            self._cancel_hold_watch = None
+        self._hold_watch_until = None
+
+    async def _async_release_hold(self, hold: _Hold, _now: datetime) -> None:
+        """Play the held song from the start, its time being up.
+
+        A song the piano never got as far as starting needs nothing sent: it plays by
+        itself once it has loaded.
+        """
+        self._cancel_hold_release = None
+        self._drop_hold()
+        if not hold.stopped:
+            self.async_write_ha_state()
+            return
+        try:
+            await self._async_call(self.coordinator.client.async_play())
+        except HomeAssistantError as err:
+            _LOGGER.warning("Could not play the held song: %s", err)
+            self.async_write_ha_state()
+            return
+        self._set_optimistic_state(MediaPlayerState.PLAYING)
+
+    @callback
+    def _cancel_hold(self) -> None:
+        """End any hold because a command takes its place, and show the piano's own state.
+
+        Written at once, since not every command writes a state of its own before the
+        refresh that follows it a second later.
+        """
+        if self._hold is not None:
+            self._drop_hold()
+            self.async_write_ha_state()
+
+    @callback
+    def _drop_hold(self) -> None:
+        """Forget any hold, and its timers. The caller writes the state that follows."""
+        self._hold = None
+        if self._cancel_hold_release is not None:
+            self._cancel_hold_release()
+            self._cancel_hold_release = None
+        self._stop_watching()
 
     # ------------------------------------------------------------------
     # Playing media
@@ -611,8 +843,11 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         play: Coroutine[Any, Any, None]
         try:
             if kind == CONTENT_RADIO:
-                # One channel replaces another directly: nothing to end first.
-                await self._async_call(client.async_play_radio(int(rest)))
+                channel_id = int(rest)
+                # One channel replaces another directly: nothing to end first, bar a
+                # held song, which the radio takes the place of.
+                self._cancel_hold()
+                await self._async_call(client.async_play_radio(channel_id))
                 return
             if kind == CONTENT_QUICK_LINK:
                 await self._async_play_quick_link(rest)
@@ -654,8 +889,10 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         """Play something, ending the radio first if it is on.
 
         While a channel is playing the piano accepts a request to play anything else and
-        ignores it, so without this the media browser would appear to do nothing.
+        ignores it, so without this the media browser would appear to do nothing. A
+        held song gives way too: something else was chosen instead.
         """
+        self._cancel_hold()
         if self._radio:
             try:
                 await self._async_call(self.coordinator.client.async_stop_radio())

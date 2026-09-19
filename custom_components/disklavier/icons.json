@@ -26,5 +26,10 @@
         }
       }
     }
+  },
+  "services": {
+    "hold_playback": {
+      "service": "mdi:timer-pause-outline"
+    }
   }
 }

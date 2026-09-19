@@ -1,0 +1,15 @@
+hold_playback:
+  target:
+    entity:
+      integration: disklavier
+      domain: media_player
+  fields:
+    duration:
+      required: true
+      example: "00:00:20"
+      selector:
+        duration:
+    message:
+      example: "Waiting for the receiver"
+      selector:
+        text:
