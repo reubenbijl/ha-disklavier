@@ -39,6 +39,20 @@
       "wrong_piano": "That address is a different Disklavier. Add it as a new device instead of reconfiguring this one."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Quick Links",
+        "description": "Choose PC Sharing Folder folders to reach in one tap from the top of the media browser. Quick Links is hidden until at least one is chosen.",
+        "data": {
+          "quick_links": "Folders"
+        },
+        "data_description": {
+          "quick_links": "One folder per entry, such as Favourites. Matched by name, ignoring case; use a path such as HousePianistApp/Favourites when two folders share a name. A folder not synced yet opens empty until it is."
+        }
+      }
+    }
+  },
   "entity": {
     "button": {
       "test_chord": {

@@ -13,22 +13,56 @@ from aiodisklavier import (
     DisklavierError,
     StaticInfo,
 )
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_HOST
+from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import TextSelector, TextSelectorConfig
 from homeassistant.helpers.service_info.ssdp import SsdpServiceInfo
 
-from .const import DOMAIN
+from .const import CONF_QUICK_LINKS, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
 STEP_USER_DATA_SCHEMA = vol.Schema({vol.Required(CONF_HOST): str})
+
+OPTIONS_SCHEMA = vol.Schema(
+    {
+        vol.Optional(CONF_QUICK_LINKS): TextSelector(TextSelectorConfig(multiple=True)),
+    }
+)
+
+
+def _clean_quick_links(folders: list[str]) -> list[str]:
+    """Tidy the folders as typed: no blanks, no stray slashes, no repeats.
+
+    Matching is case-insensitive, so two entries differing only in case are one folder.
+    """
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for folder in folders:
+        folder = folder.strip().strip("/").strip()
+        if folder and folder.casefold() not in seen:
+            seen.add(folder.casefold())
+            cleaned.append(folder)
+    return cleaned
 
 
 class DisklavierConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for a Yamaha Disklavier."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> DisklavierOptionsFlow:
+        """Return the options flow, which chooses the Quick Links folders."""
+        return DisklavierOptionsFlow()
 
     def __init__(self) -> None:
         """Initialise the flow."""
@@ -150,4 +184,32 @@ class DisklavierConfigFlow(ConfigFlow, domain=DOMAIN):
                 "model": self._static_info.model,
                 "host": self._host,
             },
+        )
+
+
+class DisklavierOptionsFlow(OptionsFlow):
+    """Choose which PC Sharing Folder folders appear under Quick Links.
+
+    Nothing is offered until some are chosen: every share is laid out differently, and a
+    link to a folder that is not there opens onto an empty page.
+    """
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show and save the Quick Links folders."""
+        if user_input is not None:
+            return self.async_create_entry(
+                data={
+                    CONF_QUICK_LINKS: _clean_quick_links(
+                        user_input.get(CONF_QUICK_LINKS, [])
+                    )
+                }
+            )
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=self.add_suggested_values_to_schema(
+                OPTIONS_SCHEMA, self.config_entry.options
+            ),
         )

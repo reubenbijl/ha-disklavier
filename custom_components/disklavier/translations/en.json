@@ -94,6 +94,20 @@
       "message": "Only a song that is starting or playing can be held."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "quick_links": "Folders"
+        },
+        "data_description": {
+          "quick_links": "One folder per entry, such as Favourites. Matched by name, ignoring case; use a path such as HousePianistApp/Favourites when two folders share a name. A folder not synced yet opens empty until it is."
+        },
+        "description": "Choose PC Sharing Folder folders to reach in one tap from the top of the media browser. Quick Links is hidden until at least one is chosen.",
+        "title": "Quick Links"
+      }
+    }
+  },
   "services": {
     "hold_playback": {
       "name": "Hold playback",

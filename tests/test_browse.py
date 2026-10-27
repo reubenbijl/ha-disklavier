@@ -34,7 +34,11 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
-from custom_components.disklavier.const import LIBRARY_SETTLE_SECONDS, SCAN_INTERVAL
+from custom_components.disklavier.const import (
+    CONF_QUICK_LINKS,
+    LIBRARY_SETTLE_SECONDS,
+    SCAN_INTERVAL,
+)
 
 from .conftest import on_the_radio, setup_integration, share_db
 
@@ -557,6 +561,60 @@ async def test_browse_quick_links_lists_the_configured_folders(
     assert node.children[1].media_content_id == "quick_link/favourites"
     assert not any(child.can_play for child in node.children)
     assert all(child.can_expand for child in node.children)
+
+
+async def test_quick_links_are_hidden_until_some_are_chosen(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """With no folders chosen there is no Quick Links entry to open onto nothing.
+
+    Every share is laid out differently, so none are chosen to begin with.
+    """
+    entry = MockConfigEntry(
+        domain=mock_config_entry.domain,
+        title=mock_config_entry.title,
+        data=mock_config_entry.data,
+        unique_id=mock_config_entry.unique_id,
+    )
+    await setup_integration(hass, entry)
+
+    root = await _browse(hass)
+    assert "Quick Links" not in [child.title for child in root.children]
+
+
+async def test_quick_links_follow_the_options_without_a_reload(
+    hass: HomeAssistant, init_integration: MockConfigEntry
+) -> None:
+    """A change to the chosen folders shows on the next visit to the browser."""
+    hass.config_entries.async_update_entry(
+        init_integration, options={CONF_QUICK_LINKS: ["Bach_inventions", "My iPad"]}
+    )
+
+    node = await _browse(hass, "quick_links")
+    assert [child.title for child in node.children] == ["Bach Inventions", "My iPad"]
+
+    hass.config_entries.async_update_entry(init_integration, options={})
+    root = await _browse(hass)
+    assert "Quick Links" not in [child.title for child in root.children]
+
+
+async def test_browse_quick_link_by_path(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_client: AsyncMock
+) -> None:
+    """A folder named with its path picks that folder out of two sharing a name."""
+    mock_client.async_get_song_db.return_value = share_db(
+        (1, "Lessons/Favourites"), (2, "HousePianistApp/Favourites")
+    )
+    mock_client.async_get_songs_in_album.return_value = [
+        Song(song_id=42, title="Clair de lune")
+    ]
+
+    node = await _browse(hass, "quick_link/housepianistapp/favourites")
+
+    assert node.title == "Favourites"
+    mock_client.async_get_songs_in_album.assert_awaited_once_with(
+        2, SongGroup.PC_SHARING_FOLDER
+    )
 
 
 async def test_browse_quick_link_jumps_straight_to_the_album(

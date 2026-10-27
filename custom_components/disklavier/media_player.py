@@ -46,6 +46,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     ATTR_HOLD_UNTIL,
+    CONF_QUICK_LINKS,
     CONTENT_ALBUM,
     CONTENT_ALBUM_DIR,
     CONTENT_LIBRARY,
@@ -98,15 +99,27 @@ _SURPRISE_ME_TITLE = "Surprise Me"
 #: "(Root)" is what Yamaha's own ENSPIRE controller calls it.
 _UNNAMED_FOLDER = "(Root)"
 
-#: PC Sharing Folder subdirectories offered under "Quick Links", in display order.
-#: Each jumps straight to that folder's own page, bypassing PC Sharing Folder's own
-#: directory tree entirely. Matched case-insensitively against an album's last path
-#: segment -- never by id, since a reindex reassigns those. Add a folder here to give
-#: it the same one-tap shortcut.
-_QUICK_LINKS: list[tuple[str, str]] = [
-    ("to-review", "To Review"),
-    ("favourites", "Favourites"),
-]
+
+def _quick_link_title(folder: str) -> str:
+    """Name a Quick Links entry after its folder: ``to-review`` reads "To Review".
+
+    Only all-lowercase words are capitalised, so a name like "iPad" keeps its own case.
+    """
+    words = folder.rsplit("/", 1)[-1].replace("-", " ").replace("_", " ").split()
+    title = " ".join(word.capitalize() if word.islower() else word for word in words)
+    return title or folder
+
+
+def _is_quick_link_folder(album_title: str, folder: str) -> bool:
+    """Whether a PC Sharing Folder album is the folder a Quick Link names.
+
+    A bare name matches the album's last path segment; a name with slashes in it, such
+    as ``HousePianistApp/Favourites``, matches that many trailing segments. Both ignore
+    case.
+    """
+    title, folder = album_title.casefold(), folder.casefold()
+    return title == folder or title.endswith(f"/{folder}")
+
 
 #: Built-in genres offered under "Surprise Me", in the piano's own menu order. Each
 #: node asks the piano itself to pick a random song from that genre.
@@ -382,12 +395,22 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
     async def _async_warm_quick_links(self, _now: datetime) -> None:
         """Resolve every Quick Links folder now, so the next visit is already warm."""
         self._cancel_warm_up = None
-        for folder, _ in _QUICK_LINKS:
+        for folder in self._quick_link_folders():
             try:
                 await self._resolve_quick_link(folder)
             except DisklavierError as err:
                 # Nothing is lost: the next visit to the folder does the lookup itself.
                 _LOGGER.debug("Could not refresh quick link %s: %s", folder, err)
+
+    def _quick_link_folders(self) -> list[str]:
+        """Return the PC Sharing Folder folders offered under "Quick Links", in order.
+
+        Chosen in the integration's options and read afresh each time, so a change shows
+        on the next visit to the browser without a reload. Each jumps straight to that
+        folder's own page, bypassing PC Sharing Folder's own directory tree. Folders are
+        found by name -- never by id, since a reindex reassigns those.
+        """
+        return list(self.coordinator.config_entry.options.get(CONF_QUICK_LINKS, []))
 
     async def async_will_remove_from_hass(self) -> None:
         """Drop any pending Quick Links refresh, and any hold with its timers."""
@@ -975,7 +998,12 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
             "Disklavier",
             "root",
             [
-                _folder(_QUICK_LINKS_TITLE, CONTENT_QUICK_LINKS),
+                # Left out until some folders are chosen, rather than opening empty.
+                *(
+                    [_folder(_QUICK_LINKS_TITLE, CONTENT_QUICK_LINKS)]
+                    if self._quick_link_folders()
+                    else []
+                ),
                 *(
                     _folder(title, f"{CONTENT_LIBRARY}/{group.value}")
                     for group, title in _SONG_LIBRARIES
@@ -1121,8 +1149,8 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
             _QUICK_LINKS_TITLE,
             CONTENT_QUICK_LINKS,
             [
-                _folder(title, f"{CONTENT_QUICK_LINK}/{folder}")
-                for folder, title in _QUICK_LINKS
+                _folder(_quick_link_title(folder), f"{CONTENT_QUICK_LINK}/{folder}")
+                for folder in self._quick_link_folders()
             ],
             children_media_class=MediaClass.DIRECTORY,
         )
@@ -1147,11 +1175,7 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         else:
             albums = await client.async_get_albums(SongGroup.PC_SHARING_FOLDER)
         return next(
-            (
-                album
-                for album in albums
-                if album.title.rsplit("/", 1)[-1].casefold() == folder.casefold()
-            ),
+            (album for album in albums if _is_quick_link_folder(album.title, folder)),
             None,
         )
 
@@ -1205,7 +1229,7 @@ class DisklavierMediaPlayer(DisklavierEntity, MediaPlayerEntity):
         picking it (an automation's media picker saves that id) finds the folder by
         name at the time, not by an album id that moves when the folder is recreated.
         """
-        title = next((t for f, t in _QUICK_LINKS if f == folder), folder)
+        title = _quick_link_title(folder)
         resolved = await self._resolve_quick_link(folder)
         return _page(
             title,

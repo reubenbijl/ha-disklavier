@@ -64,6 +64,16 @@ rediscovery. If it is not, use **Reconfigure** on the integration entry rather t
 and re-adding it, which would lose the entity history. Reconfigure refuses to point an entry
 at a *different* piano.
 
+### Quick Links
+
+**Configure** on the integration entry chooses PC Sharing Folder folders to put under
+**Quick Links** at the top of the media browser, so the ones you use most open in one tap
+instead of several. Enter each folder's name, such as `Favourites`; it is found by name,
+ignoring case, so it survives the piano renumbering its albums on a reindex. Where two
+folders share a name, enter enough of the path to tell them apart, such as
+`HousePianistApp/Favourites`. Quick Links is hidden until at least one folder is chosen, and
+changes show the next time the browser opens.
+
 ### Removing it
 
 Delete the integration entry from **Settings → Devices & Services**. Nothing is left behind
@@ -90,7 +100,7 @@ playlist_item/<group>/<id>
 radio/<channel_id>
 random/<genre>                 e.g. random/jazz — the piano picks
 search/<title>                 e.g. search/Clair de lune
-quick_link/<folder>            e.g. quick_link/favourites — a Quick Links folder, found by name
+quick_link/<folder>            e.g. quick_link/favourites — a PC Sharing Folder folder, found by name
 ```
 
 Every page of the media browser has a **search box** (and voice assistants can use the same

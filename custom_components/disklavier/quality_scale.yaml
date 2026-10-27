@@ -97,10 +97,10 @@ rules:
   config-entry-unloading:
     status: done
   docs-configuration-parameters:
-    status: exempt
+    status: done
     comment: |
-      The integration has no options flow. Host is the only setting, and it is changed
-      through the reconfigure flow.
+      The options flow sets the Quick Links folders, documented in the README. Host is
+      changed through the reconfigure flow.
   docs-installation-parameters:
     status: done
     comment: README documents the host parameter and where to find it on the piano.

@@ -27,7 +27,7 @@ from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.disklavier.const import DOMAIN
+from custom_components.disklavier.const import CONF_QUICK_LINKS, DOMAIN
 
 HOST = "192.168.1.50"
 DISKLAVIER_ID = "DKV000000000000"
@@ -177,11 +177,12 @@ def library_song() -> LibrarySong:
 
 @pytest.fixture
 def mock_config_entry() -> MockConfigEntry:
-    """Return a config entry for the piano."""
+    """Return a config entry for the piano, with two Quick Links folders chosen."""
     return MockConfigEntry(
         domain=DOMAIN,
         title="Disklavier PRO",
         data={CONF_HOST: HOST},
+        options={CONF_QUICK_LINKS: ["to-review", "favourites"]},
         unique_id=DISKLAVIER_ID,
     )
 

@@ -21,6 +21,9 @@ WAKEUP_SECONDS: Final = 15
 #: Polling sooner only reads back the state the command just replaced.
 COMMAND_SETTLE_SECONDS: Final = 1.0
 
+#: Options key: the PC Sharing Folder folders offered under "Quick Links", in order.
+CONF_QUICK_LINKS: Final = "quick_links"
+
 #: How long after the piano reports a library change before Quick Links are refreshed.
 #: Album listings can still fail with "no album" for a few seconds after a reindex, and a
 #: refresh inside that window would leave a folder unresolved until someone opened it.
