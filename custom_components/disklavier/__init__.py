@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-import voluptuous as vol
+import probatio as vol
 from aiodisklavier import Disklavier, DisklavierConnectionError, DisklavierError
 from homeassistant.components.media_player import DOMAIN as MEDIA_PLAYER_DOMAIN
 from homeassistant.const import CONF_HOST, Platform

@@ -6,8 +6,8 @@ from dataclasses import replace
 from datetime import timedelta
 from unittest.mock import AsyncMock
 
+import probatio as vol
 import pytest
-import voluptuous as vol
 from aiodisklavier import (
     CurrentInfo,
     DisklavierCommandError,

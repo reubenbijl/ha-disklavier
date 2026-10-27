@@ -33,7 +33,7 @@ rules:
 
       A pull request to home-assistant/brands is open as well, adding
       custom_integrations/disklavier. That folder is legacy and nothing this integration
-      supports still reads it -- hacs.json requires 2026.3 -- but a core submission would
+      supports still reads it -- hacs.json requires 2026.9 -- but a core submission would
       need the artwork upstream regardless, so it is worth landing.
 
       Source artwork is in assets/; assets/brands/ holds the exports.
